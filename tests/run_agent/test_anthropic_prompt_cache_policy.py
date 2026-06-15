@@ -200,16 +200,50 @@ class TestMiniMaxAnthropicWire:
         )
         assert agent._anthropic_prompt_cache_policy() == (True, True)
 
-    def test_minimax_provider_on_openai_wire_does_not_cache(self):
-        # chat_completions transport — MiniMax's cache_control support is
-        # documented only for the /anthropic endpoint. Stay off.
+    def test_minimax_provider_on_openai_wire_caches_with_envelope_layout(self):
+        # MiniMax on /v1 (chat_completions mode) uses passive auto-caching:
+        # the server reads cache_control markers on inner content parts and
+        # returns cached prompt bytes at 0.1x read pricing.  Envelope layout
+        # (native=False) is correct — markers on inner content, not top-level
+        # tool messages.  Matches the Qwen/Alibaba pattern.
         agent = _make_agent(
             provider="minimax",
             base_url="https://api.minimax.io/v1",
             api_mode="chat_completions",
             model="minimax-m2.7",
         )
-        assert agent._anthropic_prompt_cache_policy() == (False, False)
+        assert agent._anthropic_prompt_cache_policy() == (True, False)
+
+    def test_minimax_provider_on_openai_wire_m3(self):
+        # Same envelope-layout caching for MiniMax-M3 on /v1.
+        agent = _make_agent(
+            provider="minimax",
+            base_url="https://api.minimax.io/v1",
+            api_mode="chat_completions",
+            model="MiniMax-M3",
+        )
+        assert agent._anthropic_prompt_cache_policy() == (True, False)
+
+    def test_minimax_cn_on_openai_wire_caches(self):
+        # minimax-cn provider on /v1 also gets envelope-layout caching.
+        agent = _make_agent(
+            provider="minimax-cn",
+            base_url="https://api.minimaxi.com/v1",
+            api_mode="chat_completions",
+            model="MiniMax-M2.7",
+        )
+        assert agent._anthropic_prompt_cache_policy() == (True, False)
+
+    def test_minimax_host_match_on_openai_wire_caches(self):
+        # Even with provider="custom", a base_url host match on api.minimax.io
+        # on /v1 activates envelope-layout caching.
+        agent = _make_agent(
+            provider="custom",
+            base_url="https://api.minimax.io/v1",
+            api_mode="chat_completions",
+            model="minimax-m2.7",
+        )
+        assert agent._anthropic_prompt_cache_policy() == (True, False)
 
 
 class TestOpenAIWireFormatOnCustomProvider:

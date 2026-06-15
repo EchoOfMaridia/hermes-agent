@@ -118,16 +118,16 @@ HERMES_OVERLAYS: Dict[str, HermesOverlay] = {
         base_url_env_var="STEPFUN_BASE_URL",
     ),
     "minimax": HermesOverlay(
-        transport="anthropic_messages",
+        transport="openai_chat",
         base_url_env_var="MINIMAX_BASE_URL",
     ),
     "minimax-oauth": HermesOverlay(
-        transport="anthropic_messages",
+        transport="openai_chat",
         auth_type="oauth_external",
-        base_url_override="https://api.minimax.io/anthropic",
+        base_url_override="https://api.minimax.io/v1",
     ),
     "minimax-cn": HermesOverlay(
-        transport="anthropic_messages",
+        transport="openai_chat",
         base_url_env_var="MINIMAX_CN_BASE_URL",
     ),
     "deepseek": HermesOverlay(

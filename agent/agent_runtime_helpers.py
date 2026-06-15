@@ -566,7 +566,7 @@ def strip_think_blocks(agent, content: str) -> str:
     #    shows above it.  If there is no ``\n\n``, fall back to
     #    stripping the whole post-tag run (pure thinking, no answer).
     _unterm_body_pat = re.compile(
-        r'(?:^|(?<=\n))(?=[^ \t])'  # start of string OR after newline; next char non-whitespace
+        r'(?:^|\n)[ \t]*'
         r'<(?:think|thinking|reasoning|thought|REASONING_SCRATCHPAD)\b[^>]*>'
         r'(?P<body>.*)$',
         flags=re.DOTALL | re.IGNORECASE,
@@ -1196,13 +1196,13 @@ def extract_reasoning(agent, assistant_message) -> Optional[str]:
         # "reasoning appears after the message" regression on M2.7).
         if not reasoning_parts:
             _unterm_pat = re.compile(
-                    r'(?:^|(?<=\n))(?=[^ \t])'  # start of string OR after newline; next char non-whitespace
-                    r'<(?i:(?:think|thinking|reasoning|thought|REASONING_SCRATCHPAD))\b[^>]*>'
-                    r'(?P<body>.*)$',
-                    flags=re.DOTALL | re.IGNORECASE,
-                )
+                r'^(?=[^ \t])'   # start of string, first char is non-whitespace
+                r'<(?i:(?:think|thinking|reasoning|thought|REASONING_SCRATCHPAD))\b[^>]*>'
+                r'(.*)',
+                flags=re.DOTALL,
+            )
             for m in _unterm_pat.finditer(content):
-                after_open = m.group("body")  # everything after the open tag
+                after_open = m.group(1)  # everything after the open tag
                 # Only treat as unterminated if there is NO close tag in the
                 # after-open content (avoids double-extraction on malformed
                 # blocks that have both an open and a close tag)

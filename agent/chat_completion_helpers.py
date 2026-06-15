@@ -901,8 +901,8 @@ def build_assistant_message(agent, assistant_message, finish_reason: str) -> dic
         # flows back into ``content`` below.  If there is no ``\n\n``,
         # the whole post-tag run is reasoning (pure thinking, no answer).
         _unterm_pat = re.compile(
-            r'(?:^|(?<=\n))(?=[^ \t])'  # start of string OR after newline; next char non-whitespace
-            r'<(?:think|thinking|reasoning|thought|REASONING_SCRATCHPAD)\b[^>]*>'
+            r'^(?=[^ \t])'   # start of string, first char is non-whitespace
+            r'<(?i:(?:think|thinking|reasoning|thought|REASONING_SCRATCHPAD))\b[^>]*>'
             r'(.*)',
             flags=re.DOTALL,
         )
