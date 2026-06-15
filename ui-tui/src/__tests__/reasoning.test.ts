@@ -32,15 +32,29 @@ describe('splitReasoning', () => {
     // Regression for "TUI eats last paragraph of output": when the model
     // emits a literal `<think>` somewhere in prose (quoted explanation, code
     // example, partial stream-mid-tag), the trailing greedy unclosed-tag
-    // regex used to consume every paragraph after it. Real unclosed
-    // reasoning blocks always lead the message — anchor to ^ so prose
-    // mentions are preserved.
+    // regex used to consume every paragraph after it.  Anchor to ^ so prose
+    // mentions are preserved — a stray <think> mid-paragraph (after regular
+    // single-line text, not after a paragraph break) is NOT matched.
     const { reasoning, text } = splitReasoning(
-      'final answer paragraph one.\n\n<think>internal note never closed\n\nfinal answer paragraph two.'
+      'final answer paragraph one. <think>internal note never closed\n\nfinal answer paragraph two.'
     )
 
     expect(reasoning).toBe('')
-    expect(text).toBe('final answer paragraph one.\n\n<think>internal note never closed\n\nfinal answer paragraph two.')
+    expect(text).toBe('final answer paragraph one. <think>internal note never closed\n\nfinal answer paragraph two.')
+  })
+
+  it('extracts unclosed <think> after a paragraph break, preserving the answer', () => {
+    // When the model emits prior assistant text, then a paragraph break,
+    // then an unclosed <think> block, then another paragraph break, then
+    // the answer — the thinking must be extracted into the reasoning panel
+    // and BOTH the prior text AND the answer must survive in content.
+    // This is the MiniMax M2.7 "Some text\n<think>think\n\nanswer" pattern.
+    const { reasoning, text } = splitReasoning(
+      'prior assistant text.\n\n<think>Let me work this out\n\nThe answer is 42.'
+    )
+
+    expect(reasoning).toBe('Let me work this out')
+    expect(text).toBe('prior assistant text.\n\nThe answer is 42.')
   })
 
   it('returns empty reasoning and untouched text when no tags present', () => {
