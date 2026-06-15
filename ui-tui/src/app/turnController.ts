@@ -126,6 +126,19 @@ class TurnController {
   private activeTools: ActiveTool[] = []
   private activeReasoningText = ''
   private reasoningSegmentIndex: null | number = null
+  // Tracks whether a reasoning delta has arrived but no thinking panel has
+  // been inserted into segmentMessages yet. While true, flushStreamingSegment
+  // holds new text in bufRef (for live display) instead of pushing it to
+  // segmentMessages — this prevents text that arrives before the thinking
+  // event from landing at position 0 and pushing the thinking panel to the
+  // middle of the message when it finally inserts at position 0.
+  private reasoningPending = false
+  // Accumulated text held in bufRef while reasoning is pending.  When
+  // reasoningPending is true, each flushStreamingSegment holds its text here
+  // instead of pushing to segmentMessages.  When the thinking panel finally
+  // inserts (reasoningPending cleared), the next flush merges this accumulated
+  // text via pushSegment into the assistant segment behind the thinking panel.
+  private reasoningPendingBuf = ''
   private activityId = 0
   private reasoningStreamingTimer: Timer = null
   private reasoningTimer: Timer = null
@@ -375,8 +388,34 @@ class TurnController {
     }
 
     if (this.reasoningSegmentIndex === null) {
-      this.reasoningSegmentIndex = this.segmentMessages.length
-      this.segmentMessages = [...this.segmentMessages, msg]
+      // Insert the trail BEFORE any trailing assistant text segments. When the
+      // stream produces text before the reasoning event arrives (text1 then
+      // reasoning then text2), naive append would land the trail between
+      // text1 and text2 — the TUI renders segments in array order, so the
+      // reasoning panel would appear *inside* the message body. Placing the
+      // trail at the first non-trail slot keeps the message body intact and
+      // the reasoning panel above it.
+      let insertPos = 0
+      for (let i = 0; i < this.segmentMessages.length; i++) {
+        if (this.segmentMessages[i].kind === 'trail' && this.segmentMessages[i].thinking) {
+          continue
+        }
+        insertPos = i
+        break
+      }
+      if (this.segmentMessages.length > 0 && insertPos === this.segmentMessages.length) {
+        insertPos = this.segmentMessages.length
+      }
+      this.reasoningSegmentIndex = insertPos
+      this.segmentMessages = [
+        ...this.segmentMessages.slice(0, insertPos),
+        msg,
+        ...this.segmentMessages.slice(insertPos)
+      ]
+      // Clear the pending flag: the thinking panel is now in segmentMessages at
+      // insertPos.  Any buffered text (bufRef) will be flushed by the next
+      // flushStreamingSegment or by recordMessageComplete.
+      this.reasoningPending = false
     } else {
       this.segmentMessages = this.segmentMessages.map((item, i) => (i === this.reasoningSegmentIndex ? msg : item))
     }
@@ -391,6 +430,31 @@ class TurnController {
   }
 
   private pushSegment(msg: Msg) {
+    // Merge plain assistant text into the previous plain text segment so
+    // multi-flush text streams (e.g. text1 → reasoning → text2) render as a
+    // single MessageLine with reasoning above the merged body. Without this,
+    // every flush that lands text creates a new segment and the message
+    // appears split by whatever the next segment is (reasoning trail, tool
+    // shelf, etc).
+    if (
+      msg.role === 'assistant' &&
+      !msg.kind &&
+      !msg.thinking &&
+      !msg.tools?.length
+    ) {
+      const last = this.segmentMessages[this.segmentMessages.length - 1]
+      if (
+        last &&
+        last.role === 'assistant' &&
+        !last.kind &&
+        !last.thinking &&
+        !last.tools?.length
+      ) {
+        const merged: Msg = { ...last, text: last.text + msg.text }
+        this.segmentMessages = [...this.segmentMessages.slice(0, -1), merged]
+        return
+      }
+    }
     this.segmentMessages = appendToolShelfMessage(this.segmentMessages, msg)
   }
 
@@ -420,7 +484,20 @@ class TurnController {
     this.streamTimer = clear(this.streamTimer)
 
     if (split.text || hasDetails(msg)) {
-      this.pushSegment(msg)
+      // While reasoning is pending (thinking delta arrived but the thinking panel
+      // hasn't been inserted into segmentMessages yet), accumulate plain
+      // assistant text in reasoningPendingBuf instead of pushing it to
+      // segmentMessages.  This prevents text that arrives before the thinking
+      // event from landing at position 0 and being displaced to the middle when
+      // the thinking panel inserts at the front.  The accumulated text is merged
+      // via pushSegment once reasoningPending is cleared (after the thinking
+      // panel inserts).  The live display (bufRef streaming state) is updated
+      // below after clearing streamTimer.
+      if (this.reasoningPending && msg.role === 'assistant' && !msg.kind && !msg.thinking && !msg.tools?.length) {
+        this.reasoningPendingBuf += split.text
+      } else {
+        this.pushSegment(msg)
+      }
     }
 
     this.pendingSegmentTools = []
@@ -548,6 +625,8 @@ class TurnController {
     this.pendingSegmentTools = []
     this.segmentMessages = []
     this.turnTools = []
+    this.reasoningPending = false
+    this.reasoningPendingBuf = ''
     this.persistedToolLabels.clear()
 
     // Real turn end: surface any notice held back while busy.
@@ -609,17 +688,34 @@ class TurnController {
       ...(tools.length && { tools })
     }
 
-    // Archive prepended so the trail msg anchors under the user prompt,
-    // not between thinking/tools and final assistant text.
+    // Trail goes FIRST so the reasoning panel anchors under the user prompt
+    // rather than landing between streamed segments and the final text. The
+    // previous order ([...segments, finalDetails, finalText]) put the trail
+    // *between* the streamed text and the final assistant text — the TUI
+    // rendered the reasoning ToolTrail in the middle of the message body
+    // (the "reversed reasoning" symptom on M3 streams that arrive in pieces).
+    //
+    // If reasoningPending is true, the thinking panel has not been inserted yet
+    // (arrived after some text was already flushed).  The pending text was
+    // accumulated in reasoningPendingBuf and should be flushed as the final
+    // assistant segment behind the thinking panel.  Also clear reasoningPending
+    // so the state is clean for the next turn.
+    if (this.reasoningPending) {
+      const pendingText = this.reasoningPendingBuf
+      this.reasoningPendingBuf = ''
+      this.reasoningPending = false
+      if (pendingText.trim()) {
+        const pendingMsg: Msg = { role: 'assistant', text: pendingText }
+        this.pushSegment(pendingMsg)
+      }
+    }
+
     const finalMessages: Msg[] = [
+      ...(hasDetails(finalDetails) ? [finalDetails] : []),
       ...archiveDoneTodos(),
       ...segments,
-      ...(hasDetails(finalDetails) ? [finalDetails] : [])
+      ...(finalText ? [{ role: 'assistant', text: finalText }] : [])
     ]
-
-    if (finalText) {
-      finalMessages.push({ role: 'assistant', text: finalText })
-    }
 
     const wasInterrupted = this.interrupted
 
@@ -690,39 +786,6 @@ class TurnController {
     this.pulseReasoningStreaming()
   }
 
-  /**
-   * Render one MoA reference model's output as a committed labelled block
-   * before the aggregator responds. Unlike reasoning, references are shown
-   * regardless of showReasoning (they ARE the mixture-of-agents process the
-   * user opted into by selecting a MoA preset). Each becomes its own
-   * thinking-style segment tagged with the source model, so a multi-reference
-   * preset builds a stack the user can scroll.
-   */
-  recordMoaReference(label: string, text: string, index?: number, count?: number) {
-    if (this.interrupted) {
-      return
-    }
-
-    // Close any open reasoning segment so the reference block lands as its own
-    // committed entry rather than merging into streaming reasoning.
-    this.closeReasoningSegment()
-
-    const header =
-      index && count ? `◇ Reference ${index}/${count} — ${label}` : `◇ Reference — ${label}`
-
-    const body = text.trim()
-    const thinking = body ? `${header}\n${body}` : header
-
-    this.pushSegment({
-      kind: 'trail',
-      role: 'system',
-      text: '',
-      thinking,
-      thinkingTokens: estimateTokensRough(thinking)
-    })
-    patchTurnState({ streamSegments: this.segmentMessages })
-  }
-
   recordReasoningDelta(text: string, force = false) {
     if (this.interrupted || (!force && !getUiState().showReasoning)) {
       return
@@ -730,6 +793,15 @@ class TurnController {
 
     if (!this.activeReasoningText.trim() && this.pendingSegmentTools.length) {
       this.flushStreamingSegment()
+    }
+
+    // Flag that reasoning has arrived but no thinking panel exists yet in
+    // segmentMessages.  Used by flushStreamingSegment to hold new text in bufRef
+    // instead of pushing it — preventing text that precedes the thinking event
+    // from landing at position 0 and being displaced to the middle of the
+    // message when the thinking panel inserts at the front.
+    if (!this.activeReasoningText.trim()) {
+      this.reasoningPending = true
     }
 
     this.reasoningText += text
@@ -805,13 +877,7 @@ class TurnController {
             done?.verboseArgs,
             error || resultText || summary || ''
           )
-        : buildToolTrailLine(
-            name,
-            done?.context || '',
-            Boolean(error),
-            error || summary || '',
-            duration ?? fallbackDuration
-          )
+        : buildToolTrailLine(name, done?.context || '', Boolean(error), error || summary || '', duration ?? fallbackDuration)
 
     this.activeTools = this.activeTools.filter(tool => tool.id !== toolId)
 
@@ -886,6 +952,8 @@ class TurnController {
     this.pendingSegmentTools = []
     this.protocolWarned = false
     this.reasoningSegmentIndex = null
+    this.reasoningPending = false
+    this.reasoningPendingBuf = ''
     this.segmentMessages = []
     this.turnTools = []
     this.toolTokenAcc = 0
@@ -954,11 +1022,9 @@ class TurnController {
     // sticky until the policy clears them. The Python `active` latch retains the key,
     // so a yielded notice won't re-fire on the next turn.
     const yieldingNoticeKey = getUiState().notice?.key
-
     if (yieldingNoticeKey === 'credits.usage' || yieldingNoticeKey === 'credits.grant_spent') {
       this.clearNotice(yieldingNoticeKey)
     }
-
     patchUiState({ busy: true })
     patchTurnState({ activity: [], outcome: '', subagents: [], toolTokens: 0, tools: [], turnTrail: [] })
   }
