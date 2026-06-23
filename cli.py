@@ -470,7 +470,12 @@ def load_cli_config() -> Dict[str, Any]:
             "skin": "default",
         },
         "clarify": {
-            "timeout": 120,  # Seconds to wait for a clarify answer before auto-proceeding
+            "timeout": 1800, # Seconds to wait for a clarify answer before auto-proceeding.
+                             # Bumped from 120 to 1800 (30 min) because interactive-plan
+                             # workflows hit long research phases and users often tab out
+                             # while the agent is mid-investigation. Match
+                             # defaults.clarify_timeout (1800s) so CLI and gateway
+                             # agree on how long to wait before auto-proceeding.
         },
         "code_execution": {
             "timeout": 300,    # Max seconds a sandbox script can run before being killed (5 min)
@@ -11574,7 +11579,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
         """
         import time as _time
 
-        timeout = CLI_CONFIG.get("clarify", {}).get("timeout", 120)
+        timeout = CLI_CONFIG.get("clarify", {}).get("timeout", 1800)
         response_queue = queue.Queue()
         is_open_ended = not choices
 

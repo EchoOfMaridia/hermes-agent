@@ -89,3 +89,71 @@ def test_env_loader_sanitizes_before_dotenv():
         assert parsed_token == token
     finally:
         env_path.unlink(missing_ok=True)
+
+
+def test_load_env_strips_inline_comments():
+    """Verify load_env() strips trailing ``# comment`` from values.
+
+    Regression: previously, a line like
+    ``MINIMAX_BASE_URL=https://api.x/v1  # override default base URL``
+    would be parsed with the trailing comment baked into the value,
+    which then produced 404s when the URL was sent to the upstream API.
+    python-dotenv strips inline comments by default; ``load_env()`` was
+    missing that behavior until this fix.
+    """
+    from hermes_cli.config import load_env
+
+    content = (
+        "MINIMAX_BASE_URL=https://api.minimax.io/v1  # Override default base URL\n"
+        "GLM_BASE_URL=https://api.z.ai/api/paas/v4  # trailing comment\n"
+        "ALIBABA_BASE_URL=https://example.com/v1  \n"  # trailing whitespace only
+        "NO_COMMENT=https://example.com/v1\n"
+    )
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".env", delete=False, encoding="utf-8"
+    ) as f:
+        f.write(content)
+        env_path = Path(f.name)
+
+    try:
+        with patch("hermes_cli.config.get_env_path", return_value=env_path):
+            result = load_env()
+        # Inline comments stripped:
+        assert result.get("MINIMAX_BASE_URL") == "https://api.minimax.io/v1", (
+            f"got {result.get('MINIMAX_BASE_URL')!r}"
+        )
+        assert result.get("GLM_BASE_URL") == "https://api.z.ai/api/paas/v4", (
+            f"got {result.get('GLM_BASE_URL')!r}"
+        )
+        # Trailing whitespace alone is also fine (already handled by .strip()):
+        assert result.get("ALIBABA_BASE_URL") == "https://example.com/v1"
+        # No comment to strip:
+        assert result.get("NO_COMMENT") == "https://example.com/v1"
+    finally:
+        env_path.unlink(missing_ok=True)
+
+
+def test_load_env_preserves_url_fragments():
+    """Verify ``#`` chars NOT preceded by whitespace are preserved.
+
+    URL fragments (e.g. ``https://example.com/page#section``) must survive
+    parsing. The inline-comment stripper only fires on ``\\s+#``, so a ``#``
+    glued to other chars is left alone.
+    """
+    from hermes_cli.config import load_env
+
+    content = "DOCS_URL=https://example.com/docs#section\n"
+    with tempfile.NamedTemporaryFile(
+        mode="w", suffix=".env", delete=False, encoding="utf-8"
+    ) as f:
+        f.write(content)
+        env_path = Path(f.name)
+
+    try:
+        with patch("hermes_cli.config.get_env_path", return_value=env_path):
+            result = load_env()
+        assert result.get("DOCS_URL") == "https://example.com/docs#section", (
+            f"URL fragment was stripped: got {result.get('DOCS_URL')!r}"
+        )
+    finally:
+        env_path.unlink(missing_ok=True)

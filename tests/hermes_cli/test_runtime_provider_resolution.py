@@ -1533,8 +1533,14 @@ def test_api_key_provider_explicit_api_mode_config(monkeypatch):
     assert resolved["api_mode"] == "anthropic_messages"
 
 
-def test_minimax_default_url_uses_anthropic_messages(monkeypatch):
-    """MiniMax with default /anthropic URL should auto-detect anthropic_messages mode."""
+def test_minimax_default_url_uses_chat_completions(monkeypatch):
+    """MiniMax with default /v1 URL should auto-detect chat_completions mode.
+
+    The canonical ``PROVIDER_REGISTRY`` default is now ``/v1`` (was ``/anthropic``).
+    The ``/v1`` path triggers the chat-completions api_mode auto-detector in
+    ``agent_init.py``; ``/anthropic`` would still produce ``anthropic_messages``
+    if explicitly overridden via ``MINIMAX_BASE_URL``.
+    """
     monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "minimax")
     monkeypatch.setattr(rp, "_get_model_config", lambda: {})
     monkeypatch.setenv("MINIMAX_API_KEY", "test-minimax-key")
@@ -1543,8 +1549,28 @@ def test_minimax_default_url_uses_anthropic_messages(monkeypatch):
     resolved = rp.resolve_runtime_provider(requested="minimax")
 
     assert resolved["provider"] == "minimax"
-    assert resolved["api_mode"] == "anthropic_messages"
-    assert resolved["base_url"] == "https://api.minimax.io/anthropic"
+    assert resolved["api_mode"] == "chat_completions"
+    assert resolved["base_url"] == "https://api.minimax.io/v1"
+
+
+def test_minimax_env_var_overrides_default(monkeypatch):
+    """``MINIMAX_BASE_URL`` env var must override the registry default.
+
+    Regression guard for the env-var escape hatch: the registry default is
+    now ``/v1`` but users who need ``/anthropic`` (or any custom URL) can
+    still set ``MINIMAX_BASE_URL`` to redirect sub-agent traffic. The
+    api_mode should follow the URL path the env var points at.
+    """
+    monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "minimax")
+    monkeypatch.setattr(rp, "_get_model_config", lambda: {})
+    monkeypatch.setenv("MINIMAX_API_KEY", "test-minimax-key")
+    monkeypatch.setenv("MINIMAX_BASE_URL", "https://custom.example.com/v1")
+
+    resolved = rp.resolve_runtime_provider(requested="minimax")
+
+    assert resolved["provider"] == "minimax"
+    assert resolved["api_mode"] == "chat_completions"
+    assert resolved["base_url"] == "https://custom.example.com/v1"
 
 
 def test_minimax_v1_url_uses_chat_completions(monkeypatch):
@@ -1634,7 +1660,7 @@ def test_minimax_config_base_url_ignored_for_different_provider(monkeypatch):
     resolved = rp.resolve_runtime_provider(requested="minimax")
 
     # Should use the default, NOT the config base_url from a different provider
-    assert resolved["base_url"] == "https://api.minimax.io/anthropic"
+    assert resolved["base_url"] == "https://api.minimax.io/v1"
 
 
 def test_alibaba_default_coding_intl_endpoint_uses_chat_completions(monkeypatch):

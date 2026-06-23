@@ -23,7 +23,7 @@ def clarify_callback(cli, question, choices):
     """
     from cli import CLI_CONFIG
 
-    timeout = CLI_CONFIG.get("clarify", {}).get("timeout", 120)
+    timeout = CLI_CONFIG.get("clarify", {}).get("timeout", 1800)
     response_queue = queue.Queue()
     is_open_ended = not choices
 

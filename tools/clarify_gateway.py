@@ -162,85 +162,12 @@ def resolve_gateway_clarify(clarify_id: str, response: str) -> bool:
     return True
 
 
-def resolve_choice_by_index(clarify_id: str, index: int) -> bool:
-    """Resolve a pending multi-choice clarify by button index.
+def get_pending_for_session(session_key: str) -> Optional[_ClarifyEntry]:
+    """Return the OLDEST pending clarify entry for a session, or None.
 
-    Public helper for platform adapters (Discord ``ClarifyChoiceView``,
-    Telegram ``InlineKeyboardButton`` callbacks, etc.) that render one
-    button per choice and need a clean way to resolve the choice WITHOUT
-    reaching into the module's private ``_entries`` dict.
-
-    Why this exists (the Discord "buttons grayed out, agent stuck" bug):
-    The Discord adapter historically did::
-
-        from tools.clarify_gateway import _entries
-        entry = _entries.get(self.clarify_id)
-        if entry and entry.choices and 0 <= index < len(entry.choices):
-            resolved_text = entry.choices[index]
-        ...
-        resolve_gateway_clarify(self.clarify_id, resolved_text)
-
-    That reach-in pattern has three failure modes:
-
-      1. The entry was already cleaned up by a session-boundary clear or a
-         late timeout. ``_entries.get`` returns ``None`` and the adapter
-         falls back to the truncated button label as the answer. The
-         agent receives a value that doesn't match ``choices_offered``,
-         ``clarify_tool`` tags it ``"unresolved"``, the gate halts, and
-         the agent is stuck because every button was already grayed out.
-      2. The resolve call fails (network error, callback exception). The
-         buttons are still grayed. The user can't re-click. Session
-         must be destroyed.
-      3. Private-state reach means any change to ``clarify_gateway``
-         internals silently breaks the adapter's resolve path. The bug
-         class never gets fixed in one place.
-
-    This helper centralises the entry lookup and resolve. If the entry is
-    gone (cleaned up by timeout or session-boundary cleanup) the call is
-    a clean no-op — the adapter's late click doesn't crash, doesn't fall
-    back to truncated text, doesn't brick the session.
-
-    Args:
-        clarify_id: The pending clarify entry's id (UUID hex, 10 chars).
-        index: Zero-based index into the entry's ``choices`` list.
-
-    Returns:
-        ``True`` if a resolve fired; ``False`` if the entry was not found,
-        already resolved, has no choices (open-ended clarify), or the
-        index is out of range.
-    """
-    with _lock:
-        entry = _entries.get(clarify_id)
-        if entry is None:
-            return False
-        # Already resolved — idempotent no-op so a late Discord click
-        # doesn't overwrite the user's first choice.
-        if entry.event.is_set():
-            return False
-        if entry.choices is None:
-            # Open-ended clarify — use the text-fallback path, not the
-            # button-by-index path. Returning False here forces the adapter
-            # to fall back to mark_awaiting_text + text-intercept.
-            return False
-        if not (0 <= index < len(entry.choices)):
-            return False
-        resolved_text = entry.choices[index]
-    return resolve_gateway_clarify(clarify_id, resolved_text)
-
-
-def get_pending_for_session(
-    session_key: str,
-    *,
-    include_choice_prompts: bool = False,
-) -> Optional[_ClarifyEntry]:
-    """Return the oldest pending clarify entry for a session, or None.
-
-    By default this only returns entries awaiting free-form text (open-ended
-    clarifies, or a multi-choice clarify after the user picked ``Other``).
-    Gateways may pass ``include_choice_prompts=True`` when the user has typed
-    directly in response to an active multi-choice prompt; in that case the
-    oldest unresolved clarify is returned so the text can resolve it instead
-    of being queued as an unrelated follow-up turn.
+    Used by the text-fallback intercept in ``_handle_message`` — when a
+    clarify is awaiting a free-form text response, the next user message
+    in that session is captured as the answer.
     """
     with _lock:
         ids = _session_index.get(session_key) or []
@@ -248,36 +175,9 @@ def get_pending_for_session(
             entry = _entries.get(cid)
             if entry is None:
                 continue
-            if include_choice_prompts or entry.awaiting_text:
+            if entry.awaiting_text:
                 return entry
         return None
-
-
-def _coerce_text_response(entry: _ClarifyEntry, response: str) -> str:
-    """Map typed choice replies to canonical choice text, otherwise keep custom text."""
-    text = str(response).strip()
-    if entry.choices:
-        try:
-            idx = int(text) - 1
-        except ValueError:
-            idx = -1
-        if 0 <= idx < len(entry.choices):
-            return entry.choices[idx]
-        for choice in entry.choices:
-            if text.casefold() == str(choice).strip().casefold():
-                return str(choice).strip()
-    return text
-
-
-def resolve_text_response_for_session(session_key: str, response: str) -> bool:
-    """Resolve the oldest pending clarify in ``session_key`` from typed text."""
-    entry = get_pending_for_session(session_key, include_choice_prompts=True)
-    if entry is None:
-        return False
-    return resolve_gateway_clarify(
-        entry.clarify_id,
-        _coerce_text_response(entry, response),
-    )
 
 
 def mark_awaiting_text(clarify_id: str) -> bool:
@@ -305,11 +205,7 @@ def clear_session(session_key: str) -> int:
 
     Used by session-boundary cleanup (e.g. ``/new``, gateway shutdown,
     cached-agent eviction) so blocked agent threads don't hang past the
-    end of their session.  Returns the number of entries that were
-    *actually cancelled* (still pending when called). Entries that were
-    already resolved by a button click or text intercept are removed
-    silently and not counted — the user's choice is preserved and the
-    agent thread already unblocked.
+    end of their session.  Returns the number of entries cancelled.
     """
     with _lock:
         ids = list(_session_index.pop(session_key, []) or [])
@@ -317,10 +213,6 @@ def clear_session(session_key: str) -> int:
     cancelled = 0
     for entry in entries:
         if entry is None:
-            continue
-        if entry.event.is_set():
-            # Already resolved (button click, text intercept, prior cancel).
-            # Don't overwrite the user's response with an empty sentinel.
             continue
         # Empty string sentinel — agent code can distinguish from a real
         # response by inspecting the wait_for_response return value
@@ -332,25 +224,6 @@ def clear_session(session_key: str) -> int:
     return cancelled
 
 
-def force_cancel_session(session_key: str) -> int:
-    """Atomic panic-button cancel — alias-shaped surface for /stop and /new.
-
-    Functionally identical to ``clear_session``. Exists as a separate name
-    so call sites that want to signal "user explicitly hit cancel, drop
-    everything" read clearly at the call site, and so the bug-fix history
-    (the Discord "stuck button" incident of 2026-06-29) has a single
-    symbol to point at in postmortems.
-
-    Without this, the only way to escape a stuck clarify was to destroy
-    the entire session. Now ``/stop`` can fire ``force_cancel_session``
-    to unblock the agent thread and let the agent respond with a halt
-    (clarify_tool's ``user_response_mode == "unresolved"`` discipline
-    catches the sentinel and forces a halt, so the agent doesn't proceed
-    past the gate the user was trying to escape from).
-    """
-    return clear_session(session_key)
-
-
 # =========================================================================
 # Config
 # =========================================================================
@@ -358,13 +231,13 @@ def force_cancel_session(session_key: str) -> int:
 def get_clarify_timeout() -> int:
     """Read the clarify response timeout (seconds) from config.
 
-    Defaults to 3600 (1 hour) — long enough that a user who steps away
-    (meeting, AFK, slow to read) still finds a live entry when they tap
-    the button, short enough that a genuinely abandoned prompt eventually
+    Defaults to 1800 (30 minutes) — long enough for the user to step away
+    during a research-heavy interactive-plan phase (or any long-running
+    delegated work), short enough that an abandoned prompt eventually
     unblocks the agent thread instead of pinning the running-agent guard
-    forever.  The old 600s default evicted the entry mid-think, so a late
-    tap landed on a dead entry and the agent hung on ``running: clarify``
-    (#32762).
+    forever. Was 600 before interactive-plan workflows started routinely
+    exceeding the 10-minute ceiling; raise further in config.yaml if you
+    walk away even longer.
 
     Reads ``agent.clarify_timeout`` from config.yaml.
     """
@@ -372,9 +245,9 @@ def get_clarify_timeout() -> int:
         from hermes_cli.config import load_config
         cfg = load_config() or {}
         agent_cfg = cfg.get("agent", {}) or {}
-        return int(agent_cfg.get("clarify_timeout", 3600))
+        return int(agent_cfg.get("clarify_timeout", 1800))
     except Exception:
-        return 3600
+        return 1800
 
 
 # =========================================================================
