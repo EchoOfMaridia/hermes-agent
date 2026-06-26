@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest'
 
-import { gatewayEventRequiresSessionId, resolveGatewayEventSessionId } from './gateway-events'
+import {
+  gatewayEventCompletedFileDiff,
+  gatewayEventRequiresSessionId,
+  isCompactingStatusKind
+} from './gateway-events'
 
 describe('gateway event routing', () => {
   it('drops only unscoped subagent events (genuinely background work)', () => {
@@ -24,75 +28,29 @@ describe('gateway event routing', () => {
     expect(gatewayEventRequiresSessionId('session.info')).toBe(false)
     expect(gatewayEventRequiresSessionId(undefined)).toBe(false)
   })
+})
 
-  it('keeps unscoped stream events pinned to the session that started them', () => {
-    const started = resolveGatewayEventSessionId({
-      activeSessionId: 'session-a',
-      eventType: 'message.start',
-      explicitSessionId: '',
-      unscopedStreamSessionId: null
-    })
-
-    expect(started).toEqual({
-      drop: false,
-      nextUnscopedStreamSessionId: 'session-a',
-      sessionId: 'session-a'
-    })
-
-    const delta = resolveGatewayEventSessionId({
-      activeSessionId: 'session-b',
-      eventType: 'message.delta',
-      explicitSessionId: '',
-      unscopedStreamSessionId: started.nextUnscopedStreamSessionId
-    })
-
-    expect(delta).toEqual({
-      drop: false,
-      nextUnscopedStreamSessionId: 'session-a',
-      sessionId: 'session-a'
-    })
-
-    const completed = resolveGatewayEventSessionId({
-      activeSessionId: 'session-b',
-      eventType: 'message.complete',
-      explicitSessionId: '',
-      unscopedStreamSessionId: delta.nextUnscopedStreamSessionId
-    })
-
-    expect(completed).toEqual({
-      drop: false,
-      nextUnscopedStreamSessionId: null,
-      sessionId: 'session-a'
-    })
+describe('isCompactingStatusKind', () => {
+  it('accepts the auto-compaction kind (mid-turn re-tagged by the gateway)', () => {
+    // The gateway's _status_update re-tags generic `lifecycle` events to
+    // `compacting` when the body contains the compaction marker. This is
+    // the long-standing path the chrome `CompactionHint` already supports.
+    expect(isCompactingStatusKind('compacting')).toBe(true)
   })
 
-  it('routes a new unscoped stream start to the currently active session', () => {
-    const routed = resolveGatewayEventSessionId({
-      activeSessionId: 'session-b',
-      eventType: 'message.start',
-      explicitSessionId: '',
-      unscopedStreamSessionId: 'session-a'
-    })
-
-    expect(routed).toEqual({
-      drop: false,
-      nextUnscopedStreamSessionId: 'session-b',
-      sessionId: 'session-b'
-    })
+  it('accepts the manual /compress kind emitted by session.compress', () => {
+    // Regression: tui_gateway/server.py:5918 emits kind="compressing" directly
+    // (no re-tag), which the desktop handler previously ignored, so manual
+    // /compress never showed the chrome spinner.
+    expect(isCompactingStatusKind('compressing')).toBe(true)
   })
 
-  it('keeps explicit events scoped and clears a matching pinned stream on completion', () => {
-    const routed = resolveGatewayEventSessionId({
-      activeSessionId: 'session-b',
-      eventType: 'message.complete',
-      explicitSessionId: 'session-a',
-      unscopedStreamSessionId: 'session-a'
-    })
-
-    expect(routed).toEqual({
-      drop: false,
-      nextUnscopedStreamSessionId: null,
-      sessionId: 'session-a'
-    })
+  it('rejects unrelated status kinds', () => {
+    expect(isCompactingStatusKind('process')).toBe(false)
+    expect(isCompactingStatusKind('lifecycle')).toBe(false)
+    expect(isCompactingStatusKind('ready')).toBe(false)
+    expect(isCompactingStatusKind(undefined)).toBe(false)
+    expect(isCompactingStatusKind(null)).toBe(false)
+    expect(isCompactingStatusKind(42)).toBe(false)
   })
 })

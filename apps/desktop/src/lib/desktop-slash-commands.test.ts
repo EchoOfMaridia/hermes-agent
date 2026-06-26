@@ -35,8 +35,25 @@ describe('desktop slash command curation', () => {
     expect(isDesktopSlashSuggestion('/redraw')).toBe(false)
     expect(isDesktopSlashSuggestion('/approve')).toBe(false)
     expect(isDesktopSlashSuggestion('/model')).toBe(false)
-    expect(isDesktopSlashSuggestion('/skills')).toBe(false)
-    expect(isDesktopSlashSuggestion('/voice')).toBe(false)
+    // /skills, /plugins, /image, /reload-mcp, /reload-skills, /platforms,
+    // /logs, /history, /reload all used to be unavailable on the
+    // desktop — typed `/reload-mcp` returned "only available in the terminal
+    // interface" stub. They're plain `slash.exec` round-trips that the
+    // gateway handles, so they should surface in the popover the same way
+    // `/agents` and `/tools` do.
+    expect(isDesktopSlashSuggestion('/skills')).toBe(true)
+    expect(isDesktopSlashSuggestion('/plugins')).toBe(true)
+    expect(isDesktopSlashSuggestion('/image')).toBe(true)
+    expect(isDesktopSlashSuggestion('/reload-mcp')).toBe(true)
+    expect(isDesktopSlashSuggestion('/reload-skills')).toBe(true)
+    expect(isDesktopSlashSuggestion('/platforms')).toBe(true)
+    expect(isDesktopSlashSuggestion('/logs')).toBe(true)
+    expect(isDesktopSlashSuggestion('/history')).toBe(true)
+    expect(isDesktopSlashSuggestion('/reload')).toBe(true)
+    // /voice used to be unavailable:advanced (no desktop surface). It now
+    // has an action handler that drives voice.toggle on the gateway, so it
+    // surfaces in the popover like /personality and /reasoning.
+    expect(isDesktopSlashSuggestion('/voice')).toBe(true)
     expect(isDesktopSlashSuggestion('/curator')).toBe(false)
   })
 
@@ -52,16 +69,6 @@ describe('desktop slash command curation', () => {
     expect(desktopSlashUnavailableMessage('/personality')).toBeNull()
   })
 
-  it('routes /pet through the desktop action handler and drops /pets', () => {
-    expect(resolveDesktopCommand('/pet')?.surface).toEqual({ kind: 'action', action: 'pet' })
-    expect(resolveDesktopCommand('/pet')?.args).toBe(true)
-    expect(isDesktopSlashSuggestion('/pet')).toBe(true)
-    expect(isDesktopSlashCommand('/pet')).toBe(true)
-    expect(resolveDesktopCommand('/pets')?.surface).toEqual({ kind: 'unavailable', reason: 'settings' })
-    expect(isDesktopSlashSuggestion('/pets')).toBe(false)
-    expect(isDesktopSlashCommand('/pets')).toBe(false)
-  })
-
   it('treats /browser as an executable action command (local-gateway connect)', () => {
     // /browser used to be terminal-only; it now resolves to a desktop action
     // handler that routes browser.manage RPC when the gateway is local.
@@ -73,16 +80,34 @@ describe('desktop slash command curation', () => {
     expect(resolveDesktopCommand('/browser')?.args).toBe(true)
   })
 
-  it('routes /journey (and aliases) to the memory graph overlay action', () => {
-    expect(resolveDesktopCommand('/journey')?.surface).toEqual({ kind: 'action', action: 'journey' })
-    expect(resolveDesktopCommand('/memory-graph')?.surface).toEqual({ kind: 'action', action: 'journey' })
-    expect(resolveDesktopCommand('/learning')?.surface).toEqual({ kind: 'action', action: 'journey' })
-    expect(isDesktopSlashCommand('/journey')).toBe(true)
-    expect(isDesktopSlashCommand('/memory-graph')).toBe(true)
-    expect(isDesktopSlashSuggestion('/journey')).toBe(true)
-    // Aliases execute but stay out of the popover.
-    expect(isDesktopSlashSuggestion('/memory-graph')).toBe(false)
-    expect(desktopSlashUnavailableMessage('/journey')).toBeNull()
+  it('routes /compress to the desktop action handler (bypasses slash worker)', () => {
+    // Regression: /compress used to resolve to surface: exec(), which routed
+    // through slash_worker → HermesCLI(process_command) and failed the
+    // "conversation_history < 4" guard because the worker never loaded
+    // history (it constructed HermesCLI(resume=...) without cli.run() so
+    // self.conversation_history stayed empty). Now it routes to the
+    // session.compress RPC like the TUI does.
+    expect(resolveDesktopCommand('/compress')?.surface).toEqual({ kind: 'action', action: 'compress' })
+    expect(isDesktopSlashCommand('/compress')).toBe(true)
+    expect(isDesktopSlashSuggestion('/compress')).toBe(true)
+    expect(desktopSlashUnavailableMessage('/compress')).toBeNull()
+    // /compress takes optional arg ("here [N]" boundary, focus topic, etc.).
+    expect(resolveDesktopCommand('/compress')?.args).toBe(true)
+  })
+
+  it('exposes /reasoning, /fast, /busy, /verbose, and /voice as action commands (parity with the TUI)', () => {
+    // These commands used to be unavailable on the desktop (no surface).
+    // They now have action handlers that drive config.get / config.set /
+    // voice.toggle on the gateway, mirroring ui-tui/.../slash/commands/session.ts.
+    for (const command of ['/reasoning', '/fast', '/busy', '/verbose', '/voice']) {
+      expect(isDesktopSlashCommand(command)).toBe(true)
+      expect(isDesktopSlashSuggestion(command)).toBe(true)
+      expect(desktopSlashUnavailableMessage(command)).toBeNull()
+      expect(resolveDesktopCommand(command)?.surface?.kind).toBe('action')
+      // Each takes an inline arg (status|set|on|off|…) so the popover
+      // expands to the two-step picker rather than committing immediately.
+      expect(resolveDesktopCommand(command)?.args).toBe(true)
+    }
   })
 
   it('allows aliases to execute without cluttering the popover', () => {
@@ -178,7 +203,10 @@ describe('desktop slash command curation', () => {
 
   it('explains known commands that desktop owns elsewhere', () => {
     expect(desktopSlashUnavailableMessage('/model sonnet')).toContain('model picker')
-    expect(desktopSlashUnavailableMessage('/skills')).toContain('desktop sidebar')
+    // /skills is now an exec() command — typing it round-trips through the
+    // gateway's slash worker instead of getting an "unavailable" stub. The
+    // desktop sidebar Skills UI is one path; the slash command is another.
+    expect(desktopSlashUnavailableMessage('/skills')).toBeNull()
     expect(desktopSlashUnavailableMessage('/clear')).toContain('terminal interface')
   })
 

@@ -213,7 +213,16 @@ export function useSessionStateCache({
       // state anyway). The plain busy heartbeat stays RAF-batched: that
       // coalescing exists only to keep periodic `session.info` updates from
       // churning `$messages` and jerking the scroll position while reading.
-      const isCriticalTransition = !state.busy || state.needsInput
+      // A session switch (pendingViewStateRef points at a different session than
+      // the one currently rendered) is never a heartbeat — it's the cached
+      // fast-path repainting the chat with another session's transcript, and
+      // deferring it leaves the user staring at the previous session's content
+      // until the RAF happens to fire ("the chat stays put on the wrong
+      // session after I clicked another row" — symptom of the bug being that
+      // viewSessionIdRef still points at the old session at the time of the
+      // deferred flush).
+      const isSessionSwitch = pendingViewStateRef.current.sessionId !== viewSessionIdRef.current
+      const isCriticalTransition = !state.busy || state.needsInput || isSessionSwitch
 
       if (isCriticalTransition) {
         if (viewSyncRafRef.current !== null && typeof window !== 'undefined') {

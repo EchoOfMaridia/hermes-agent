@@ -2311,6 +2311,32 @@ export const zhHant = defineLocale({
     promptFailed: '提示詞傳送失敗',
     providerCredentialRequired: '傳送第一則訊息前請先新增提供方憑證。',
     emptySlashCommand: '空的斜線指令',
+    // TODO(translate): replace English fallback with proper Traditional Chinese copy.
+    slashNoActiveAgent: 'Send any message first, then try this command again.',
+    // TODO(translate): replace English fallback with proper Traditional Chinese copy.
+    compressRunning: 'Compressing conversation…',
+    // TODO(translate): replace English fallback with proper Traditional Chinese copy.
+    reasoningStatus: (value, display) => `reasoning: ${value} · display ${display}`,
+    reasoningSet: value => `reasoning: ${value}`,
+    // TODO(translate): replace English fallback with proper Traditional Chinese copy.
+    fastStatus: mode => `fast mode: ${mode}`,
+    fastSet: mode => `fast mode: ${mode}`,
+    // TODO(translate): replace English fallback with proper Traditional Chinese copy.
+    busyStatus: mode => `busy input mode: ${mode}`,
+    busySet: mode => `busy input mode: ${mode}`,
+    // TODO(translate): replace English fallback with proper Traditional Chinese copy.
+    voiceStatusHeader: 'Voice Mode Status',
+    voiceModeLine: mode => `  Mode:       ${mode}`,
+    voiceTtsLine: mode => `  TTS:        ${mode}`,
+    voiceRecordKeyLine: binding => `  Record key: ${binding}`,
+    voiceRequirementsHeader: '  Requirements:',
+    voiceEnabled: tts => `Voice mode enabled${tts ? ' (TTS enabled)' : ''}`,
+    voiceEnabledRecordHint: binding => `  ${binding} to start/stop recording`,
+    voiceEnabledTtsHint: '  /voice tts  to toggle speech output',
+    voiceEnabledOffHint: '  /voice off  to disable voice mode',
+    voiceDisabled: 'Voice mode disabled.',
+    voiceTtsEnabled: 'Voice TTS enabled.',
+    voiceTtsDisabled: 'Voice TTS disabled.',
     desktopCommands: '桌面端指令',
     skillCommandsAvailable: count => `${count} 個技能指令可用。`,
     warningLine: message => `警告：${message}`,

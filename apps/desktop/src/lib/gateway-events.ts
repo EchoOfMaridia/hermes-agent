@@ -130,6 +130,27 @@ export function gatewayEventCompletedFileDiff(event: RpcEventLike): boolean {
   return typeof diff === 'string' && diff.trim().length > 0
 }
 
+/**
+ * Whether a `status.update` event's `kind` field signals that a compaction
+ * (manual /compress OR mid-turn auto-compaction) is in flight for the session.
+ *
+ * The gateway emits two shapes for the same intent:
+ *   - `"compacting"` — auto-compaction mid-turn. The gateway's `_status_update`
+ *     re-tags the generic `lifecycle` kind to `"compacting"` when it detects
+ *     the compaction marker in the body.
+ *   - `"compressing"` — manual `/compress` invoked from the desktop composer.
+ *     `tui_gateway/server.py:5918` calls `_status_update(sid, "compressing", …)`
+ *     directly, without going through the re-tag branch, so the kind string
+ *     never normalizes to `"compacting"`.
+ *
+ * Without accepting both, manual `/compress` on a large context emits a
+ * `status.update` event that the desktop drops on the floor — the chrome
+ * spinner never shows and the user can't tell the command fired.
+ */
+export function isCompactingStatusKind(kind: unknown): boolean {
+  return kind === 'compacting' || kind === 'compressing'
+}
+
 export function buildGatewayLogItems(lines: readonly string[]): readonly StatusbarMenuItem[] {
   if (lines.length === 0) {
     return [
