@@ -59,6 +59,27 @@ export interface SessionSteerResponse {
   text?: string
 }
 
+export interface SessionCompressSummary {
+  noop?: boolean
+  headline?: string
+  token_line?: string
+  note?: string
+}
+
+export interface SessionCompressResponse {
+  // Mirror of tui_gateway/server.py:session.compress payload.
+  status?: string
+  removed?: number
+  before_messages?: number
+  after_messages?: number
+  before_tokens?: number
+  after_tokens?: number
+  summary?: SessionCompressSummary
+  usage?: Record<string, unknown>
+  info?: Record<string, unknown>
+  messages?: unknown[]
+}
+
 export interface SessionTitleResponse {
   title?: string
   // True when the session row isn't persisted yet and the title was queued
@@ -95,6 +116,45 @@ export interface ExecCommandDispatchResponse {
 export interface AliasCommandDispatchResponse {
   type: 'alias'
   target: string
+}
+
+// Mirror of ui-tui/src/gatewayTypes.ts:ConfigGetValueResponse — `config.get`
+// returns the raw value plus optional display metadata; the desktop reads
+// both for /reasoning and /busy status lines.
+export interface ConfigGetValueResponse {
+  value?: string
+  display?: string
+  home?: string
+}
+
+// Mirror of ui-tui/src/gatewayTypes.ts:ConfigSetResponse. `confirm_required`
+// drives the expensive-model picker for /model; the desktop reuses the
+// same `ConfigSetResponse` shape for /reasoning, /fast, /busy, /personality
+// so it can surface credential warnings + history_reset side effects
+// (e.g. /personality triggers transcript.clear()).
+export interface ConfigSetResponse {
+  value?: string
+  warning?: string
+  credential_warning?: string
+  confirm_required?: boolean
+  confirm_message?: string
+  history_reset?: boolean
+  info?: Record<string, unknown>
+}
+
+// Mirror of ui-tui/src/gatewayTypes.ts:VoiceToggleResponse. `details`
+// is the "Requirements:" block rendered by /voice status (STT provider
+// missing, audio backend, etc.) and `record_key` is the configured
+// push-to-talk binding — the desktop formats it for display the same
+// way the TUI does.
+export interface VoiceToggleResponse {
+  enabled?: boolean
+  tts?: boolean
+  available?: boolean
+  audio_available?: boolean
+  stt_available?: boolean
+  record_key?: string
+  details?: string
 }
 
 export interface SkillCommandDispatchResponse {

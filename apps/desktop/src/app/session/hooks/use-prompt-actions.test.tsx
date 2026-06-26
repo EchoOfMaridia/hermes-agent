@@ -264,6 +264,786 @@ describe('usePromptActions slash.exec dispatch payloads', () => {
     expect(renderedText).toContain('⊙ Goal set. Starting now.')
     expect(renderedText).not.toContain('/goal: no output')
   })
+
+  it('translates the backend "no active agent" sentinel into a desktop precondition error instead of echoing it verbatim', async () => {
+    // Regression: typing /usage into a fresh chat (no prior user message, no
+    // active agent) hit the gateway's slash worker, which printed
+    //   "(._.) No active agent -- send a message first."
+    // and the desktop rendered that string straight back to the user as if it
+    // were the command's output. The desktop must recognize the sentinel and
+    // surface a clearer "send any message first" message — and never echo
+    // the backend's `(._.)` kaomoji text in the chat panel.
+    const states: Record<string, unknown>[] = []
+    const requestGateway = vi.fn(async (method: string) => {
+      if (method === 'slash.exec') {
+        return {
+          output: '(._.) No active agent -- send a message first.'
+        } as never
+      }
+
+      return {} as never
+    })
+
+    let handle: HarnessHandle | null = null
+    render(
+      <Harness
+        onReady={h => (handle = h)}
+        onSeedState={s => states.push(s)}
+        refreshSessions={async () => undefined}
+        requestGateway={requestGateway}
+      />
+    )
+
+    await handle!.submitText('/usage')
+
+    const renderedText = states
+      .flatMap(state => {
+        const messages = Array.isArray(state.messages)
+          ? (state.messages as Array<{ parts?: Array<{ text?: string }> }>)
+          : []
+
+        return messages.flatMap(message => (message.parts ?? []).map(part => part.text ?? ''))
+      })
+      .join('\n')
+
+    // The backend's kaomoji sentinel must NOT leak into the chat.
+    expect(renderedText).not.toContain('(._.)')
+    expect(renderedText).not.toContain('No active agent -- send a message first')
+    // And the user should see a real precondition hint.
+    expect(renderedText.toLowerCase()).toMatch(/send.*message.*first/)
+    expect(renderedText).not.toContain('/usage: no output')
+  })
+
+  it('routes /compress through session.compress RPC and renders the gateway summary', async () => {
+    // Regression: /compress used to flow through slash_worker, which
+    // constructed HermesCLI(resume=session_key) without cli.run(), leaving
+    // self.conversation_history empty and always returning
+    // "(._.) Not enough conversation to compress". Now /compress calls
+    // session.compress directly, which uses the live session["history"]
+    // from the active agent run — the same path the TUI uses.
+    const calls: { method: string; params?: Record<string, unknown> }[] = []
+    const states: Record<string, unknown>[] = []
+    const requestGateway = vi.fn(async (method: string, params?: Record<string, unknown>) => {
+      calls.push({ method, params })
+
+      if (method === 'session.compress') {
+        return {
+          status: 'compressed',
+          removed: 12,
+          before_messages: 30,
+          after_messages: 18,
+          before_tokens: 50000,
+          after_tokens: 12000,
+          summary: {
+            noop: false,
+            headline: 'Compressed: 30 → 18 messages',
+            token_line: 'Approx request size: ~50,000 → ~12,000 tokens',
+            note: null
+          }
+        } as never
+      }
+
+      return {} as never
+    })
+
+    let handle: HarnessHandle | null = null
+    render(
+      <Harness
+        onReady={h => (handle = h)}
+        onSeedState={s => states.push(s)}
+        refreshSessions={async () => undefined}
+        requestGateway={requestGateway}
+      />
+    )
+
+    await handle!.submitText('/compress')
+
+    // Routed to session.compress, NEVER to the broken slash worker.
+    expect(calls.map(c => c.method)).toEqual(['session.compress'])
+    expect(calls[0]?.params).toEqual({
+      session_id: RUNTIME_SESSION_ID,
+      focus_topic: ''
+    })
+
+    const renderedText = states
+      .flatMap(state => {
+        const messages = Array.isArray(state.messages)
+          ? (state.messages as Array<{ parts?: Array<{ text?: string }> }>)
+          : []
+
+        return messages.flatMap(message => (message.parts ?? []).map(part => part.text ?? ''))
+      })
+      .join('\n')
+
+    // The gateway's summary lines are rendered verbatim, mirroring the TUI.
+    expect(renderedText).toContain('✓ Compressed: 30 → 18 messages')
+    expect(renderedText).toContain('Approx request size: ~50,000 → ~12,000 tokens')
+    // The broken worker sentinel must NOT appear.
+    expect(renderedText).not.toContain('Not enough conversation to compress')
+  })
+
+  it('forwards /compress <focus> as focus_topic to the gateway', async () => {
+    const calls: { method: string; params?: Record<string, unknown> }[] = []
+    const requestGateway = vi.fn(async (method: string, params?: Record<string, unknown>) => {
+      calls.push({ method, params })
+
+      if (method === 'session.compress') {
+        return {
+          status: 'compressed',
+          removed: 4,
+          summary: { noop: false, headline: 'Compressed: 10 → 6 messages', token_line: '', note: null }
+        } as never
+      }
+
+      return {} as never
+    })
+
+    let handle: HarnessHandle | null = null
+    render(<Harness onReady={h => (handle = h)} refreshSessions={async () => undefined} requestGateway={requestGateway} />)
+
+    await handle!.submitText('/compress focus on the auth refactor')
+
+    expect(calls[0]?.params).toEqual({
+      session_id: RUNTIME_SESSION_ID,
+      focus_topic: 'focus on the auth refactor'
+    })
+  })
+
+  it('renders the noop headline without a checkmark when compression made no changes', async () => {
+    const states: Record<string, unknown>[] = []
+    const requestGateway = vi.fn(async (method: string) => {
+      if (method === 'session.compress') {
+        return {
+          status: 'compressed',
+          removed: 0,
+          summary: {
+            noop: true,
+            headline: 'No changes from compression: 183 messages',
+            token_line: 'Approx request size: ~109,614 tokens (unchanged)',
+            note: null
+          }
+        } as never
+      }
+
+      return {} as never
+    })
+
+    let handle: HarnessHandle | null = null
+    render(
+      <Harness
+        onReady={h => (handle = h)}
+        onSeedState={s => states.push(s)}
+        refreshSessions={async () => undefined}
+        requestGateway={requestGateway}
+      />
+    )
+
+    await handle!.submitText('/compress')
+
+    const renderedText = states
+      .flatMap(state => {
+        const messages = Array.isArray(state.messages)
+          ? (state.messages as Array<{ parts?: Array<{ text?: string }> }>)
+          : []
+
+        return messages.flatMap(message => (message.parts ?? []).map(part => part.text ?? ''))
+      })
+      .join('\n')
+
+    expect(renderedText).toContain('No changes from compression: 183 messages')
+    expect(renderedText).toContain('Approx request size: ~109,614 tokens (unchanged)')
+    // No "✓ " prefix on a noop summary (matches TUI at ui-tui/.../session.ts:210).
+    expect(renderedText).not.toContain('✓ No changes')
+  })
+
+  it('surfaces a friendly error when the gateway refuses to compress (e.g. session busy)', async () => {
+    const states: Record<string, unknown>[] = []
+    const requestGateway = vi.fn(async (method: string) => {
+      if (method === 'session.compress') {
+        throw new Error('session busy — /interrupt the current turn before /compress')
+      }
+
+      return {} as never
+    })
+
+    let handle: HarnessHandle | null = null
+    render(
+      <Harness
+        onReady={h => (handle = h)}
+        onSeedState={s => states.push(s)}
+        refreshSessions={async () => undefined}
+        requestGateway={requestGateway}
+      />
+    )
+
+    await handle!.submitText('/compress')
+
+    const renderedText = states
+      .flatMap(state => {
+        const messages = Array.isArray(state.messages)
+          ? (state.messages as Array<{ parts?: Array<{ text?: string }> }>)
+          : []
+
+        return messages.flatMap(message => (message.parts ?? []).map(part => part.text ?? ''))
+      })
+      .join('\n')
+
+    expect(renderedText).toMatch(/compression failed/i)
+    expect(renderedText).toMatch(/interrupt/i)
+  })
+
+  it('appends an optimistic "compressing" system line before awaiting the RPC so the user sees feedback', async () => {
+    // Regression: /compress used to give no visible feedback for the duration
+    // of the session.compress RPC (often 5-20s for large contexts). The user
+    // couldn't tell whether the command fired. The handler must append a
+    // "Compressing conversation…" system line as soon as the RPC starts, so
+    // the chat shows the operation is in flight before the summary arrives.
+    const messageAppendTimestamps: number[] = []
+    const states: Record<string, unknown>[] = []
+    let resolveCompress: (value: unknown) => void = () => undefined
+
+    const requestGateway = vi.fn(async (method: string) => {
+      if (method === 'session.compress') {
+        messageAppendTimestamps.push(Date.now())
+
+        return new Promise(resolve => {
+          resolveCompress = resolve
+        }) as never
+      }
+
+      return {} as never
+    })
+
+    let handle: HarnessHandle | null = null
+    render(
+      <Harness
+        onReady={h => (handle = h)}
+        onSeedState={s => states.push(s)}
+        refreshSessions={async () => undefined}
+        requestGateway={requestGateway}
+      />
+    )
+
+    // Don't await — we want to inspect the chat panel state WHILE the RPC
+    // is still pending, then resolve the RPC and inspect the final state.
+    const inFlight = handle!.submitText('/compress')
+
+    // Yield repeatedly until the optimistic message is rendered. The RPC
+    // is hung in our mock, so this proves the line was appended BEFORE the
+    // gateway responded, not as part of the post-response render path.
+    for (let i = 0; i < 20; i += 1) {
+      await Promise.resolve()
+    }
+
+    const textWhilePending = states
+      .flatMap(state => {
+        const messages = Array.isArray(state.messages)
+          ? (state.messages as Array<{ parts?: Array<{ text?: string }> }>)
+          : []
+
+        return messages.flatMap(message => (message.parts ?? []).map(part => part.text ?? ''))
+      })
+      .join('\n')
+
+    expect(textWhilePending.toLowerCase()).toMatch(/compress/)
+
+    // Now resolve the RPC and verify the summary is rendered too.
+    resolveCompress({
+      status: 'compressed',
+      removed: 8,
+      summary: { noop: false, headline: 'Compressed: 20 → 12 messages', token_line: '', note: null }
+    })
+
+    await inFlight
+
+    const textAfter = states
+      .flatMap(state => {
+        const messages = Array.isArray(state.messages)
+          ? (state.messages as Array<{ parts?: Array<{ text?: string }> }>)
+          : []
+
+        return messages.flatMap(message => (message.parts ?? []).map(part => part.text ?? ''))
+      })
+      .join('\n')
+
+    expect(textAfter).toContain('Compressed: 20 → 12 messages')
+    // The optimistic line must remain visible after the summary — the
+    // handler appends the summary, it doesn't replace the running line.
+    expect(textAfter.toLowerCase()).toMatch(/compress/)
+  })
+})
+
+// `/reasoning`, `/fast`, `/busy`, and `/voice` all drive `config.get` /
+// `config.set` / `voice.toggle` on the gateway instead of going through the
+// slash worker — the same path the TUI uses at
+// ui-tui/src/app/slash/commands/session.ts:407/450/493/255. These tests
+// pin the wire-level contract: which RPC fires, with which args, and what
+// status line gets appended to the chat panel.
+describe('usePromptActions parity commands (/reasoning /fast /busy /voice)', () => {
+  beforeEach(() => {
+    setSessions(() => [sessionInfo()])
+  })
+
+  afterEach(() => {
+    cleanup()
+    vi.restoreAllMocks()
+  })
+
+  function gatherText(states: Record<string, unknown>[]): string {
+    return states
+      .flatMap(state => {
+        const messages = Array.isArray(state.messages)
+          ? (state.messages as Array<{ parts?: Array<{ text?: string }> }>)
+          : []
+
+        return messages.flatMap(message => (message.parts ?? []).map(part => part.text ?? ''))
+      })
+      .join('\n')
+  }
+
+  it('bare /reasoning calls config.get and renders "value · display <hint>"', async () => {
+    const calls: { method: string; params?: Record<string, unknown> }[] = []
+    const states: Record<string, unknown>[] = []
+    const requestGateway = vi.fn(async (method: string, params?: Record<string, unknown>) => {
+      calls.push({ method, params })
+
+      if (method === 'config.get') {
+        return { display: 'show', value: 'high' } as never
+      }
+
+      return {} as never
+    })
+
+    let handle: HarnessHandle | null = null
+    render(
+      <Harness
+        onReady={h => (handle = h)}
+        onSeedState={s => states.push(s)}
+        refreshSessions={async () => undefined}
+        requestGateway={requestGateway}
+      />
+    )
+
+    await handle!.submitText('/reasoning')
+
+    expect(calls.map(c => c.method)).toEqual(['config.get'])
+    expect(calls[0]?.params).toEqual({ key: 'reasoning' })
+    expect(gatherText(states)).toContain('reasoning: high · display show')
+  })
+
+  it('bare /reasoning falls back to "reasoning: hide" when the gateway has no value', async () => {
+    const states: Record<string, unknown>[] = []
+    const requestGateway = vi.fn(async () => ({}) as never)
+
+    let handle: HarnessHandle | null = null
+    render(
+      <Harness
+        onReady={h => (handle = h)}
+        onSeedState={s => states.push(s)}
+        refreshSessions={async () => undefined}
+        requestGateway={requestGateway}
+      />
+    )
+
+    await handle!.submitText('/reasoning')
+
+    expect(gatherText(states)).toContain('reasoning: hide')
+  })
+
+  it('/reasoning <effort> calls config.set with session_id and renders the confirmed value', async () => {
+    const calls: { method: string; params?: Record<string, unknown> }[] = []
+    const states: Record<string, unknown>[] = []
+    const requestGateway = vi.fn(async (method: string, params?: Record<string, unknown>) => {
+      calls.push({ method, params })
+
+      if (method === 'config.set') {
+        return { value: 'low' } as never
+      }
+
+      return {} as never
+    })
+
+    let handle: HarnessHandle | null = null
+    render(
+      <Harness
+        onReady={h => (handle = h)}
+        onSeedState={s => states.push(s)}
+        refreshSessions={async () => undefined}
+        requestGateway={requestGateway}
+      />
+    )
+
+    await handle!.submitText('/reasoning low')
+
+    expect(calls.map(c => c.method)).toEqual(['config.set'])
+    expect(calls[0]?.params).toEqual({ key: 'reasoning', session_id: RUNTIME_SESSION_ID, value: 'low' })
+    expect(gatherText(states)).toContain('reasoning: low')
+  })
+
+  it('bare /fast renders "fast mode: normal" when the gateway reports no fast tier', async () => {
+    const calls: { method: string; params?: Record<string, unknown> }[] = []
+    const states: Record<string, unknown>[] = []
+    const requestGateway = vi.fn(async (method: string, params?: Record<string, unknown>) => {
+      calls.push({ method, params })
+
+      if (method === 'config.get') {
+        return { value: 'normal' } as never
+      }
+
+      return {} as never
+    })
+
+    let handle: HarnessHandle | null = null
+    render(
+      <Harness
+        onReady={h => (handle = h)}
+        onSeedState={s => states.push(s)}
+        refreshSessions={async () => undefined}
+        requestGateway={requestGateway}
+      />
+    )
+
+    await handle!.submitText('/fast')
+
+    expect(calls[0]?.params).toEqual({ key: 'fast', session_id: RUNTIME_SESSION_ID })
+    expect(gatherText(states)).toContain('fast mode: normal')
+  })
+
+  it('/fast fast sets the service tier via config.set and renders "fast mode: fast"', async () => {
+    const calls: { method: string; params?: Record<string, unknown> }[] = []
+    const states: Record<string, unknown>[] = []
+    const requestGateway = vi.fn(async (method: string, params?: Record<string, unknown>) => {
+      calls.push({ method, params })
+
+      if (method === 'config.set') {
+        return { value: 'fast' } as never
+      }
+
+      return {} as never
+    })
+
+    let handle: HarnessHandle | null = null
+    render(
+      <Harness
+        onReady={h => (handle = h)}
+        onSeedState={s => states.push(s)}
+        refreshSessions={async () => undefined}
+        requestGateway={requestGateway}
+      />
+    )
+
+    await handle!.submitText('/fast fast')
+
+    expect(calls[0]?.params).toEqual({ key: 'fast', session_id: RUNTIME_SESSION_ID, value: 'fast' })
+    expect(gatherText(states)).toContain('fast mode: fast')
+  })
+
+  it('rejects /fast with an invalid mode and surfaces the usage line', async () => {
+    const states: Record<string, unknown>[] = []
+    const requestGateway = vi.fn(async () => ({}) as never)
+
+    let handle: HarnessHandle | null = null
+    render(
+      <Harness
+        onReady={h => (handle = h)}
+        onSeedState={s => states.push(s)}
+        refreshSessions={async () => undefined}
+        requestGateway={requestGateway}
+      />
+    )
+
+    await handle!.submitText('/fast turbo')
+
+    expect(requestGateway).not.toHaveBeenCalled()
+    expect(gatherText(states)).toMatch(/usage.*\/fast/)
+  })
+
+  it('/busy <mode> calls config.set and renders the confirmed mode', async () => {
+    const calls: { method: string; params?: Record<string, unknown> }[] = []
+    const states: Record<string, unknown>[] = []
+    const requestGateway = vi.fn(async (method: string, params?: Record<string, unknown>) => {
+      calls.push({ method, params })
+
+      if (method === 'config.set') {
+        return { value: 'queue' } as never
+      }
+
+      return {} as never
+    })
+
+    let handle: HarnessHandle | null = null
+    render(
+      <Harness
+        onReady={h => (handle = h)}
+        onSeedState={s => states.push(s)}
+        refreshSessions={async () => undefined}
+        requestGateway={requestGateway}
+      />
+    )
+
+    await handle!.submitText('/busy queue')
+
+    expect(calls[0]?.params).toEqual({ key: 'busy', session_id: RUNTIME_SESSION_ID, value: 'queue' })
+    expect(gatherText(states)).toContain('busy input mode: queue')
+  })
+
+  it('bare /busy calls config.get and renders the current mode', async () => {
+    const states: Record<string, unknown>[] = []
+    const requestGateway = vi.fn(async () => ({ value: 'steer' }) as never)
+
+    let handle: HarnessHandle | null = null
+    render(
+      <Harness
+        onReady={h => (handle = h)}
+        onSeedState={s => states.push(s)}
+        refreshSessions={async () => undefined}
+        requestGateway={requestGateway}
+      />
+    )
+
+    await handle!.submitText('/busy')
+
+    expect(gatherText(states)).toContain('busy input mode: steer')
+  })
+
+  it('rejects /busy with an invalid mode', async () => {
+    const requestGateway = vi.fn(async () => ({}) as never)
+    const states: Record<string, unknown>[] = []
+
+    let handle: HarnessHandle | null = null
+    render(
+      <Harness
+        onReady={h => (handle = h)}
+        onSeedState={s => states.push(s)}
+        refreshSessions={async () => undefined}
+        requestGateway={requestGateway}
+      />
+    )
+
+    await handle!.submitText('/busy wibble')
+
+    expect(requestGateway).not.toHaveBeenCalled()
+    expect(gatherText(states)).toMatch(/usage.*\/busy/)
+  })
+
+  it('bare /voice renders the dashboard with Mode/TTS/Record key/Requirements lines', async () => {
+    // Regression: /voice used to be unavailable:advanced on the desktop so
+    // users had to drop into the terminal to inspect STT provider status
+    // or change the push-to-talk binding. The desktop now mirrors the TUI's
+    // dashboard output (ui-tui/.../session.ts:300-317) so the user sees the
+    // same status block they would see in `hermes chat`.
+    const calls: { method: string; params?: Record<string, unknown> }[] = []
+    const states: Record<string, unknown>[] = []
+    const requestGateway = vi.fn(async (method: string, params?: Record<string, unknown>) => {
+      calls.push({ method, params })
+
+      if (method === 'voice.toggle') {
+        return {
+          audio_available: true,
+          available: true,
+          details: 'STT provider: elevenlabs (OK)\nAudio backend: portaudio (OK)',
+          enabled: true,
+          record_key: 'ctrl+b',
+          stt_available: true,
+          tts: false
+        } as never
+      }
+
+      return {} as never
+    })
+
+    let handle: HarnessHandle | null = null
+    render(
+      <Harness
+        onReady={h => (handle = h)}
+        onSeedState={s => states.push(s)}
+        refreshSessions={async () => undefined}
+        requestGateway={requestGateway}
+      />
+    )
+
+    await handle!.submitText('/voice')
+
+    expect(calls[0]?.params).toEqual({ action: 'status', session_id: RUNTIME_SESSION_ID })
+    const text = gatherText(states)
+    expect(text).toContain('Voice Mode Status')
+    expect(text).toContain('Mode:')
+    expect(text).toContain('ON')
+    expect(text).toContain('TTS:')
+    expect(text).toContain('OFF')
+    expect(text).toContain('Record key:')
+    expect(text).toContain('Requirements:')
+    expect(text).toContain('STT provider: elevenlabs (OK)')
+    expect(text).toContain('Audio backend: portaudio (OK)')
+  })
+
+  it('/voice tts calls voice.toggle with action=tts and renders "Voice TTS enabled"', async () => {
+    const calls: { method: string; params?: Record<string, unknown> }[] = []
+    const states: Record<string, unknown>[] = []
+    const requestGateway = vi.fn(async (method: string, params?: Record<string, unknown>) => {
+      calls.push({ method, params })
+
+      if (method === 'voice.toggle') {
+        return { enabled: true, tts: true } as never
+      }
+
+      return {} as never
+    })
+
+    let handle: HarnessHandle | null = null
+    render(
+      <Harness
+        onReady={h => (handle = h)}
+        onSeedState={s => states.push(s)}
+        refreshSessions={async () => undefined}
+        requestGateway={requestGateway}
+      />
+    )
+
+    await handle!.submitText('/voice tts')
+
+    expect(calls[0]?.params).toEqual({ action: 'tts', session_id: RUNTIME_SESSION_ID })
+    expect(gatherText(states)).toContain('Voice TTS enabled.')
+  })
+
+  it('/voice on renders the 4-line enabled block with the configured record key', async () => {
+    const states: Record<string, unknown>[] = []
+    const requestGateway = vi.fn(async (method: string) => {
+      if (method === 'voice.toggle') {
+        return { enabled: true, record_key: 'ctrl+space', tts: true } as never
+      }
+
+      return {} as never
+    })
+
+    let handle: HarnessHandle | null = null
+    render(
+      <Harness
+        onReady={h => (handle = h)}
+        onSeedState={s => states.push(s)}
+        refreshSessions={async () => undefined}
+        requestGateway={requestGateway}
+      />
+    )
+
+    await handle!.submitText('/voice on')
+
+    const text = gatherText(states)
+    expect(text).toContain('Voice mode enabled (TTS enabled)')
+    expect(text).toContain('ctrl+space to start/stop recording')
+    expect(text).toContain('/voice tts  to toggle speech output')
+    expect(text).toContain('/voice off  to disable voice mode')
+  })
+
+  it('/voice off renders "Voice mode disabled."', async () => {
+    const states: Record<string, unknown>[] = []
+    const requestGateway = vi.fn(async (method: string) => {
+      if (method === 'voice.toggle') {
+        return { enabled: false, tts: false } as never
+      }
+
+      return {} as never
+    })
+
+    let handle: HarnessHandle | null = null
+    render(
+      <Harness
+        onReady={h => (handle = h)}
+        onSeedState={s => states.push(s)}
+        refreshSessions={async () => undefined}
+        requestGateway={requestGateway}
+      />
+    )
+
+    await handle!.submitText('/voice off')
+
+    expect(gatherText(states)).toContain('Voice mode disabled.')
+  })
+
+  it('surfaces a friendly error when voice.toggle RPC fails', async () => {
+    const states: Record<string, unknown>[] = []
+    const requestGateway = vi.fn(async (method: string) => {
+      if (method === 'voice.toggle') {
+        throw new Error('voice subsystem offline')
+      }
+
+      return {} as never
+    })
+
+    let handle: HarnessHandle | null = null
+    render(
+      <Harness
+        onReady={h => (handle = h)}
+        onSeedState={s => states.push(s)}
+        refreshSessions={async () => undefined}
+        requestGateway={requestGateway}
+      />
+    )
+
+    await handle!.submitText('/voice on')
+
+    expect(gatherText(states)).toMatch(/voice failed.*voice subsystem offline/)
+  })
+
+  it('bare /verbose cycles verbose mode via config.set and renders "verbose: <value>"', async () => {
+    // Regression: /verbose used to be unavailable:terminal ("only available
+    // in the terminal interface"). It's actually just a config.set round
+    // trip (ui-tui/.../slash/commands/session.ts:529), so the desktop now
+    // runs it on the gateway directly.
+    const calls: { method: string; params?: Record<string, unknown> }[] = []
+    const states: Record<string, unknown>[] = []
+    const requestGateway = vi.fn(async (method: string, params?: Record<string, unknown>) => {
+      calls.push({ method, params })
+
+      if (method === 'config.set') {
+        return { value: 'true' } as never
+      }
+
+      return {} as never
+    })
+
+    let handle: HarnessHandle | null = null
+    render(
+      <Harness
+        onReady={h => (handle = h)}
+        onSeedState={s => states.push(s)}
+        refreshSessions={async () => undefined}
+        requestGateway={requestGateway}
+      />
+    )
+
+    await handle!.submitText('/verbose')
+
+    expect(calls.map(c => c.method)).toEqual(['config.set'])
+    expect(calls[0]?.params).toEqual({ key: 'verbose', session_id: RUNTIME_SESSION_ID, value: 'cycle' })
+    expect(gatherText(states)).toContain('verbose: true')
+  })
+
+  it('forwards an explicit /verbose <value> arg verbatim', async () => {
+    const calls: { method: string; params?: Record<string, unknown> }[] = []
+    const requestGateway = vi.fn(async (method: string, params?: Record<string, unknown>) => {
+      calls.push({ method, params })
+
+      if (method === 'config.set') {
+        return { value: 'false' } as never
+      }
+
+      return {} as never
+    })
+
+    let handle: HarnessHandle | null = null
+    render(
+      <Harness
+        onReady={h => (handle = h)}
+        refreshSessions={async () => undefined}
+        requestGateway={requestGateway}
+      />
+    )
+
+    await handle!.submitText('/verbose false')
+
+    expect(calls[0]?.params).toEqual({ key: 'verbose', session_id: RUNTIME_SESSION_ID, value: 'false' })
+  })
 })
 
 describe('usePromptActions desktop slash pickers', () => {

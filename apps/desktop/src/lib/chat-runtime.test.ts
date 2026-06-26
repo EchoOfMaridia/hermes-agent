@@ -2,7 +2,12 @@ import { describe, expect, it } from 'vitest'
 
 import type { ComposerAttachment } from '@/store/composer'
 
-import { coerceThinkingText, optimisticAttachmentRef, parseCommandDispatch } from './chat-runtime'
+import {
+  coerceThinkingText,
+  optimisticAttachmentRef,
+  parseCommandDispatch,
+  parseSlashCommand
+} from './chat-runtime'
 
 const DATA_URL = 'data:image/png;base64,iVBORw0KGgoAAAANS'
 
@@ -78,5 +83,58 @@ describe('parseCommandDispatch', () => {
 
   it('rejects a prefill directive missing its message', () => {
     expect(parseCommandDispatch({ type: 'prefill', notice: 'x' })).toBeNull()
+  })
+})
+
+describe('parseSlashCommand', () => {
+  it('splits command name from a single-line argument', () => {
+    expect(parseSlashCommand('/goal write the implementation plan')).toEqual({
+      name: 'goal',
+      arg: 'write the implementation plan'
+    })
+  })
+
+  it('returns empty arg when only the command is typed', () => {
+    expect(parseSlashCommand('/usage')).toEqual({ name: 'usage', arg: '' })
+    expect(parseSlashCommand('/usage ')).toEqual({ name: 'usage', arg: '' })
+  })
+
+  it('preserves multi-line arguments so /goal with embedded newlines reaches the backend intact', () => {
+    // Regression: `^(\\S+)\\s*(.*)$` without the `s` flag stops at the first
+    // newline in `.`, collapsing `/goal write the plan\nmore details` to
+    // {name:'', arg:''} — silently dropped at the dispatcher. The desktop
+    // composer accepts multiline input (Shift+Enter) and users routinely paste
+    // multi-paragraph goals, so the parser must carry the full body through.
+    expect(parseSlashCommand('/goal write the plan\nmore details')).toEqual({
+      name: 'goal',
+      arg: 'write the plan\nmore details'
+    })
+    expect(parseSlashCommand('/goal write\n\nmore\nlines')).toEqual({
+      name: 'goal',
+      arg: 'write\n\nmore\nlines'
+    })
+    expect(parseSlashCommand('/goal\nmore details')).toEqual({
+      name: 'goal',
+      arg: 'more details'
+    })
+  })
+
+  it('preserves tab-separated arguments', () => {
+    expect(parseSlashCommand('/goal\twrite the plan')).toEqual({
+      name: 'goal',
+      arg: 'write the plan'
+    })
+  })
+
+  it('strips leading and trailing whitespace from the captured argument', () => {
+    expect(parseSlashCommand('/goal   trim me   ')).toEqual({
+      name: 'goal',
+      arg: 'trim me'
+    })
+  })
+
+  it('returns empty name for blank or slash-only input', () => {
+    expect(parseSlashCommand('')).toEqual({ name: '', arg: '' })
+    expect(parseSlashCommand('/')).toEqual({ name: '', arg: '' })
   })
 })

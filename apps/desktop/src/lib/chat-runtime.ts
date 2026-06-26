@@ -212,7 +212,12 @@ export function normalizePersonalityValue(value: string): string {
 }
 
 export function parseSlashCommand(command: string) {
-  const match = command.replace(/^\/+/, '').match(/^(\S+)\s*(.*)$/)
+  // `s` flag lets `.` cross newlines — without it, `/goal line one\nline two`
+  // collapsed to {name:'', arg:''} at the dispatcher because the `(.*)$` tail
+  // can't reach end-of-string when a `\n` is in the middle. The composer
+  // accepts multiline input (Shift+Enter) and users routinely paste multi-
+  // paragraph goals, so the parser must carry the full body through.
+  const match = command.replace(/^\/+/, '').match(/^(\S+)\s*([\s\S]*)$/)
 
   return match ? { name: match[1], arg: match[2].trim() } : { name: '', arg: '' }
 }

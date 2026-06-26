@@ -49,6 +49,8 @@ import {
   $yoloActive,
   setAwaitingResponse,
   setBusy,
+  setCurrentFastMode,
+  setCurrentServiceTier,
   setMessages,
   setModelPickerOpen,
   setSessionPickerOpen,
@@ -59,16 +61,20 @@ import { clearSessionSubagents } from '@/store/subagents'
 import { clearSessionTodos } from '@/store/todos'
 
 import type {
-  ClientSessionState,
   BrowserManageResponse,
+  ClientSessionState,
+  ConfigGetValueResponse,
+  ConfigSetResponse,
   FileAttachResponse,
   HandoffFailResponse,
   HandoffRequestResponse,
   HandoffStateResponse,
   ImageAttachResponse,
+  SessionCompressResponse,
   SessionSteerResponse,
   SessionTitleResponse,
-  SlashExecResponse
+  SlashExecResponse,
+  VoiceToggleResponse
 } from '../../types'
 
 interface HandoffResult {
@@ -368,6 +374,16 @@ function renderCommandsCatalog(catalog: CommandsCatalogLike, copy: Translations[
 
 function slashStatusText(command: string, output: string): string {
   return [`slash:${command}`, output.trim()].filter(Boolean).join('\n')
+}
+
+// Sentinel returned by the gateway slash worker (see `cli.py:_show_usage` and
+// `_manual_compress`) when an exec-style command runs in a session that has
+// no live agent yet. The desktop used to render this verbatim, which looked
+// like the command had crashed. Surface a desktop-specific hint instead.
+const NO_ACTIVE_AGENT_SENTINEL_RE = /no active agent/i
+
+function isNoActiveAgentSentinel(value: string | undefined): boolean {
+  return typeof value === 'string' && NO_ACTIVE_AGENT_SENTINEL_RE.test(value)
 }
 
 function appendText(message: AppendMessage): string {
@@ -910,6 +926,24 @@ export function usePromptActions({
 
         const { render: renderSlashOutput, sessionId } = resolved
 
+        // Defensive: if a known action command somehow lands here (a stale
+        // build, a re-dispatch via slash.exec alias path, a future caller
+        // that forgets the runSlash switch), don't fall through to the slash
+        // worker. /compress would otherwise hit the worker's HermesCLI
+        // (resume=...) which has empty conversation_history and prints
+        // "(._.) Not enough conversation", then fall back to command.dispatch
+        // which rejects it as "not a quick/plugin/skill command: <name>" —
+        // the exact two-error waterfall this dispatcher was built to avoid.
+        // Routing through the action handler keeps /compress (and any future
+        // session-scoped RPC) talking to the live gateway, never the worker.
+        const actionSurface = resolveDesktopCommand(`/${name}`)?.surface
+        if (actionSurface?.kind === 'action') {
+          const handler = actionHandlers[actionSurface.action]
+          if (handler) {
+            return handler(ctx)
+          }
+        }
+
         if (!isDesktopSlashCommand(name)) {
           renderSlashOutput(desktopSlashUnavailableMessage(name) || `/${name} is not available in the desktop app.`)
 
@@ -985,6 +1019,16 @@ export function usePromptActions({
           }
 
           const output = result && typeof result === 'object' ? (result as SlashExecResponse) : null
+          // Backend prints "(._.) No active agent -- send a message first."
+          // when an exec-style command runs before the session has an agent.
+          // Translate that sentinel into a desktop-side precondition hint so
+          // the chat panel never echoes the worker's kaomoji text verbatim.
+          if (isNoActiveAgentSentinel(output?.output)) {
+            renderSlashOutput(copy.slashNoActiveAgent)
+
+            return
+          }
+
           const body = output?.output || `/${name}: no output`
           renderSlashOutput(output?.warning ? `warning: ${output.warning}\n${body}` : body)
 
@@ -1124,8 +1168,32 @@ export function usePromptActions({
         // nor the slash worker (whose DB write can silently fail). Bare /title
         // shows the current title, which the worker owns, so delegate to exec.
         title: async ctx => {
+          // Bare /title (no arg) shows the current title. The worker owns that
+          // response, so we call slash.exec directly — calling runExec here
+          // would loop back through runExec's defensive action-surface guard
+          // (which redirects /title back to this handler).
           if (!ctx.arg) {
-            await runExec(ctx)
+            const resolved = await withSlashOutput(ctx)
+
+            if (!resolved) {
+              return
+            }
+
+            const { render: renderSlashOutput, sessionId } = resolved
+
+            try {
+              const result = await requestGateway<SlashExecResponse>('slash.exec', {
+                session_id: sessionId,
+                command: 'title'
+              })
+
+              const output = result?.output || '/title: no output'
+              const body = result?.warning ? `warning: ${result.warning}\n${output}` : output
+
+              renderSlashOutput(body)
+            } catch (err) {
+              renderSlashOutput(`error: ${err instanceof Error ? err.message : String(err)}`)
+            }
 
             return
           }
@@ -1249,6 +1317,398 @@ export function usePromptActions({
             }
           } catch (err) {
             renderSlashOutput(`error: ${err instanceof Error ? err.message : String(err)}`)
+          }
+        },
+        // /compress invokes the gateway's session.compress RPC directly — the
+        // same path the TUI uses at ui-tui/src/app/slash/commands/session.ts:183.
+        //
+        // The desktop used to send /compress to the slash worker subprocess,
+        // which constructs HermesCLI(resume=session_key) without cli.run()
+        // and never preloads conversation_history — so self.conversation_history
+        // stayed empty and _manual_compress (cli.py:8676) always returned
+        // "(._.) Not enough conversation to compress", even on sessions with
+        // 183+ messages. The slash-exec catch then fell through to
+        // command.dispatch, which rejected /compress as "not a quick/plugin/
+        // skill command: compress" — hence the two-error waterfall. The
+        // session.compress RPC uses the live session["history"] from the active
+        // agent run, so it sees the real conversation.
+        //
+        // Arg parsing mirrors cli.py:8661-8674:
+        //   /compress            → compress everything
+        //   /compress <focus>    → compress with a focus topic
+        //   /compress here [N]   → boundary-aware; the gateway honors N as a default
+        compress: async ({ arg, command, recordInput, sessionHint }) => {
+          const resolved = await withSlashOutput({
+            arg,
+            command,
+            name: 'compress',
+            recordInput,
+            sessionHint
+          })
+
+          if (!resolved) {
+            return
+          }
+
+          const { render: renderSlashOutput, sessionId } = resolved
+          const focusTopic = arg.trim()
+
+          // Optimistic feedback — /compress can take 5-20s on large contexts
+          // and the RPC blocks until the gateway finishes _compress_session_history.
+          // Without an immediate system line the user can't tell whether the
+          // command fired at all. Render a "running" line up-front, then layer
+          // the summary on top when the RPC resolves.
+          renderSlashOutput(copy.compressRunning)
+
+          try {
+            const result = await requestGateway<SessionCompressResponse>('session.compress', {
+              session_id: sessionId,
+              focus_topic: focusTopic
+            })
+
+            const summary = result?.summary
+            const headline = summary?.headline?.trim()
+
+            if (headline) {
+              // Match the TUI (ui-tui/.../session.ts:210): a non-noop summary
+              // gets a "✓ " prefix, a noop summary stays unprefixed so the
+              // "No changes from compression" line reads as a status, not a win.
+              const prefix = summary?.noop ? '' : '✓ '
+              renderSlashOutput(`${prefix}${headline}`)
+
+              const tokenLine = summary?.token_line?.trim()
+
+              if (tokenLine) {
+                renderSlashOutput(`  ${tokenLine}`)
+              }
+
+              const note = summary?.note?.trim()
+
+              if (note) {
+                renderSlashOutput(`  ${note}`)
+              }
+
+              return
+            }
+
+            if ((result?.removed ?? 0) > 0) {
+              renderSlashOutput(`compressed ${result.removed} message${result.removed === 1 ? '' : 's'}`)
+
+              return
+            }
+
+            renderSlashOutput('nothing to compress')
+          } catch (err) {
+            renderSlashOutput(
+              `compression failed: ${err instanceof Error ? err.message : String(err)}`
+            )
+          }
+        },
+        // /reasoning inspects or sets the per-session reasoning effort. Bare
+        // /reasoning calls `config.get key=reasoning` and renders the value
+        // + display hint (mirrors ui-tui/.../session.ts:407 + cli.py:_show_reasoning).
+        // With an arg, it calls `config.set key=reasoning session_id=<sid>` so
+        // the live agent picks up the new effort on the next turn — same
+        // semantics as the TUI. Both branches error gracefully if the RPC
+        // is rejected (e.g. unsupported model).
+        reasoning: async ({ arg, command, recordInput, sessionHint }) => {
+          const resolved = await withSlashOutput({
+            arg,
+            command,
+            name: 'reasoning',
+            recordInput,
+            sessionHint
+          })
+
+          if (!resolved) {
+            return
+          }
+
+          const { render: renderSlashOutput, sessionId } = resolved
+          const value = arg.trim()
+
+          try {
+            if (!value) {
+              const result = await requestGateway<ConfigGetValueResponse>('config.get', {
+                key: 'reasoning'
+              })
+
+              if (!result?.value) {
+                renderSlashOutput('reasoning: hide')
+
+                return
+              }
+
+              renderSlashOutput(copy.reasoningStatus(result.value, result.display || 'hide'))
+
+              return
+            }
+
+            const result = await requestGateway<ConfigSetResponse>('config.set', {
+              key: 'reasoning',
+              session_id: sessionId,
+              value
+            })
+
+            if (!result?.value) {
+              renderSlashOutput(`reasoning: ${value} (gateway did not confirm)`)
+
+              return
+            }
+
+            renderSlashOutput(copy.reasoningSet(result.value))
+          } catch (err) {
+            renderSlashOutput(
+              `reasoning failed: ${err instanceof Error ? err.message : String(err)}`
+            )
+          }
+        },
+        // /fast toggles Nous fast mode. Bare /fast [status] shows the current
+        // mode via config.get; otherwise the arg is forwarded to config.set
+        // (valid values: normal | fast | on | off | toggle — same as the
+        // TUI at ui-tui/.../session.ts:450). When the gateway confirms a
+        // 'fast' value we mirror the TUI's local patchUiState so the
+        // service-tier chip updates without waiting for the next config.full
+        // mtime poll.
+        fast: async ({ arg, command, recordInput, sessionHint }) => {
+          const resolved = await withSlashOutput({
+            arg,
+            command,
+            name: 'fast',
+            recordInput,
+            sessionHint
+          })
+
+          if (!resolved) {
+            return
+          }
+
+          const { render: renderSlashOutput, sessionId } = resolved
+          const mode = arg.trim().toLowerCase()
+          const valid = new Set(['', 'status', 'normal', 'fast', 'on', 'off', 'toggle'])
+
+          if (!valid.has(mode)) {
+            renderSlashOutput('usage: /fast [normal|fast|status|on|off|toggle]')
+
+            return
+          }
+
+          try {
+            if (!mode || mode === 'status') {
+              const result = await requestGateway<ConfigGetValueResponse>('config.get', {
+                key: 'fast',
+                session_id: sessionId
+              })
+
+              const next: 'fast' | 'normal' = result?.value === 'fast' ? 'fast' : 'normal'
+
+              renderSlashOutput(copy.fastStatus(next))
+
+              return
+            }
+
+            const result = await requestGateway<ConfigSetResponse>('config.set', {
+              key: 'fast',
+              session_id: sessionId,
+              value: mode
+            })
+
+            const next: 'fast' | 'normal' = result?.value === 'fast' ? 'fast' : 'normal'
+
+            renderSlashOutput(copy.fastSet(next))
+
+            // Mirror the TUI's local uiStore patch — /fast in the TUI hot-swaps
+            // the service-tier chip so the next render uses the new value
+            // without waiting for the 5s mtime poll. The desktop equivalent is
+            // the global current-session chip + active session's runtime info;
+            // setCurrentFastMode drives the chip and the next session.info
+            // flush will reconcile the per-session state.
+            setCurrentFastMode(next === 'fast')
+            setCurrentServiceTier(next === 'fast' ? 'priority' : '')
+          } catch (err) {
+            renderSlashOutput(
+              `fast mode failed: ${err instanceof Error ? err.message : String(err)}`
+            )
+          }
+        },
+        // /busy controls the "what happens when I press Enter during a turn"
+        // mode: queue (default), steer, or interrupt. Bare /busy [status]
+        // prints the current value via config.get; an arg sets it via
+        // config.set — matching the TUI at ui-tui/.../session.ts:493.
+        busy: async ({ arg, command, recordInput, sessionHint }) => {
+          const resolved = await withSlashOutput({
+            arg,
+            command,
+            name: 'busy',
+            recordInput,
+            sessionHint
+          })
+
+          if (!resolved) {
+            return
+          }
+
+          const { render: renderSlashOutput, sessionId } = resolved
+          const mode = arg.trim().toLowerCase()
+          const valid = new Set(['', 'status', 'queue', 'steer', 'interrupt'])
+
+          if (!valid.has(mode)) {
+            renderSlashOutput('usage: /busy [queue|steer|interrupt|status]')
+
+            return
+          }
+
+          try {
+            if (!mode || mode === 'status') {
+              const result = await requestGateway<ConfigGetValueResponse>('config.get', {
+                key: 'busy'
+              })
+
+              renderSlashOutput(copy.busyStatus(result?.value || 'interrupt'))
+
+              return
+            }
+
+            const result = await requestGateway<ConfigSetResponse>('config.set', {
+              key: 'busy',
+              session_id: sessionId,
+              value: mode
+            })
+
+            renderSlashOutput(copy.busySet(result?.value || mode))
+          } catch (err) {
+            renderSlashOutput(
+              `busy mode failed: ${err instanceof Error ? err.message : String(err)}`
+            )
+          }
+        },
+        // /voice manages voice mode + TTS. Mirrors the TUI at
+        // ui-tui/.../session.ts:255 (cli.py:_show_voice_status /
+        // _enable_voice_mode / _toggle_voice_tts). The argument is normalised
+        // to one of [on | off | tts | status] (default: status) so /voice
+        // bare always shows the dashboard, /voice tts flips speech output,
+        // and /voice on/off arm the voice recorder. The "Requirements:" block
+        // surfaces STT/audio backend availability so users see "STT provider:
+        // MISSING ..." instead of silently failing on every record key press.
+        voice: async ({ arg, command, recordInput, sessionHint }) => {
+          const resolved = await withSlashOutput({
+            arg,
+            command,
+            name: 'voice',
+            recordInput,
+            sessionHint
+          })
+
+          if (!resolved) {
+            return
+          }
+
+          const { render: renderSlashOutput, sessionId } = resolved
+          const normalized = arg.trim().toLowerCase()
+          const action: 'on' | 'off' | 'tts' | 'status' =
+            normalized === 'on' || normalized === 'off' || normalized === 'tts' || normalized === 'status'
+              ? normalized
+              : 'status'
+
+          try {
+            const result = await requestGateway<VoiceToggleResponse>('voice.toggle', {
+              action,
+              session_id: sessionId
+            })
+
+            if (!result) {
+              renderSlashOutput('voice: no response from gateway')
+
+              return
+            }
+
+            // The gateway returns `record_key` only when the binding actually
+            // changed — don't clobber the local voice state on /voice status
+            // if the response was empty (older gateways, or future ones that
+            // forget to include it). Falls back to the documented default
+            // for display only.
+            const recordKeyLabel = result.record_key || 'Ctrl+B'
+
+            if (action === 'status') {
+              renderSlashOutput(copy.voiceStatusHeader)
+              renderSlashOutput(copy.voiceModeLine(result.enabled ? 'ON' : 'OFF'))
+              renderSlashOutput(copy.voiceTtsLine(result.tts ? 'ON' : 'OFF'))
+              renderSlashOutput(copy.voiceRecordKeyLine(recordKeyLabel))
+
+              if (result.details) {
+                renderSlashOutput('')
+                renderSlashOutput(copy.voiceRequirementsHeader)
+
+                for (const line of result.details.split('\n')) {
+                  if (line.trim()) {
+                    renderSlashOutput(`    ${line}`)
+                  }
+                }
+              }
+
+              return
+            }
+
+            if (action === 'tts') {
+              renderSlashOutput(result.tts ? copy.voiceTtsEnabled : copy.voiceTtsDisabled)
+
+              return
+            }
+
+            // on/off — mirror cli.py:_enable_voice_mode's 3-line output
+            if (result.enabled) {
+              renderSlashOutput(copy.voiceEnabled(!!result.tts))
+              renderSlashOutput(copy.voiceEnabledRecordHint(recordKeyLabel))
+              renderSlashOutput(copy.voiceEnabledTtsHint)
+              renderSlashOutput(copy.voiceEnabledOffHint)
+            } else {
+              renderSlashOutput(copy.voiceDisabled)
+            }
+          } catch (err) {
+            renderSlashOutput(
+              `voice failed: ${err instanceof Error ? err.message : String(err)}`
+            )
+          }
+        },
+        // /verbose cycles verbose tool-output mode via config.set. Mirrors
+        // ui-tui/.../slash/commands/session.ts:529 (cli.py:_set_verbose /
+        // _cycle_verbose). The TUI's patchUiState call is purely local; the
+        // real effect is the gateway's session-scoped config update, which
+        // is the same effect the desktop needs. No arg → cycle; an explicit
+        // arg (e.g. "true" / "false") is forwarded verbatim.
+        verbose: async ({ arg, command, recordInput, sessionHint }) => {
+          const resolved = await withSlashOutput({
+            arg,
+            command,
+            name: 'verbose',
+            recordInput,
+            sessionHint
+          })
+
+          if (!resolved) {
+            return
+          }
+
+          const { render: renderSlashOutput, sessionId } = resolved
+
+          try {
+            const result = await requestGateway<ConfigSetResponse>('config.set', {
+              key: 'verbose',
+              session_id: sessionId,
+              value: arg.trim() || 'cycle'
+            })
+
+            if (!result?.value) {
+              renderSlashOutput('verbose: (no value returned)')
+
+              return
+            }
+
+            renderSlashOutput(`verbose: ${result.value}`)
+          } catch (err) {
+            renderSlashOutput(
+              `verbose failed: ${err instanceof Error ? err.message : String(err)}`
+            )
           }
         }
       }

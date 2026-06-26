@@ -1975,6 +1975,32 @@ export const ja = defineLocale({
     promptFailed: 'プロンプトに失敗しました',
     providerCredentialRequired: '最初のメッセージを送信する前にプロバイダー認証情報を追加してください。',
     emptySlashCommand: '空のスラッシュコマンド',
+    // TODO(translate): replace English fallback with proper Japanese copy.
+    slashNoActiveAgent: 'Send any message first, then try this command again.',
+    // TODO(translate): replace English fallback with proper Japanese copy.
+    compressRunning: 'Compressing conversation…',
+    // TODO(translate): replace English fallback with proper Japanese copy.
+    reasoningStatus: (value, display) => `reasoning: ${value} · display ${display}`,
+    reasoningSet: value => `reasoning: ${value}`,
+    // TODO(translate): replace English fallback with proper Japanese copy.
+    fastStatus: mode => `fast mode: ${mode}`,
+    fastSet: mode => `fast mode: ${mode}`,
+    // TODO(translate): replace English fallback with proper Japanese copy.
+    busyStatus: mode => `busy input mode: ${mode}`,
+    busySet: mode => `busy input mode: ${mode}`,
+    // TODO(translate): replace English fallback with proper Japanese copy.
+    voiceStatusHeader: 'Voice Mode Status',
+    voiceModeLine: mode => `  Mode:       ${mode}`,
+    voiceTtsLine: mode => `  TTS:        ${mode}`,
+    voiceRecordKeyLine: binding => `  Record key: ${binding}`,
+    voiceRequirementsHeader: '  Requirements:',
+    voiceEnabled: tts => `Voice mode enabled${tts ? ' (TTS enabled)' : ''}`,
+    voiceEnabledRecordHint: binding => `  ${binding} to start/stop recording`,
+    voiceEnabledTtsHint: '  /voice tts  to toggle speech output',
+    voiceEnabledOffHint: '  /voice off  to disable voice mode',
+    voiceDisabled: 'Voice mode disabled.',
+    voiceTtsEnabled: 'Voice TTS enabled.',
+    voiceTtsDisabled: 'Voice TTS disabled.',
     desktopCommands: 'デスクトップコマンド',
     skillCommandsAvailable: count => `${count} 件のスキルコマンドが利用可能です。`,
     warningLine: message => `警告: ${message}`,

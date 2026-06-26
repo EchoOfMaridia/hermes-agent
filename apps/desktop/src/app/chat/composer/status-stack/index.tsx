@@ -106,7 +106,11 @@ export function ComposerStatusStack({ queue, sessionId }: ComposerStatusStackPro
             </Button>
           ) : undefined
         }
-        defaultCollapsed={group.type !== 'todo'}
+        // Subagent rows are the whole point of the menu — auto-expand when
+        // there's anything to show, so a glance at the composer reveals running
+        // children. Todos already auto-expand (background stays collapsed because
+        // raw stdout is rarely what users want at a glance).
+        defaultCollapsed={group.type === 'background'}
         icon={
           group.type === 'todo' ? (
             <Codicon className="text-muted-foreground/70" name="checklist" size="0.8rem" />

@@ -31,19 +31,25 @@ export interface DesktopThemeCommandOption {
 export type DesktopActionId =
   | 'branch'
   | 'browser'
+  | 'busy'
+  | 'compress'
+  | 'fast'
   | 'handoff'
   | 'help'
   | 'new'
   | 'profile'
+  | 'reasoning'
   | 'skin'
   | 'title'
+  | 'verbose'
+  | 'voice'
   | 'yolo'
 
 /** A command fulfilled by opening a desktop overlay picker. */
 export type DesktopPickerId = 'model' | 'session'
 
 /** Why a known Hermes command has no desktop UI surface. */
-export type DesktopUnavailableReason = 'advanced' | 'messaging' | 'settings' | 'terminal'
+export type DesktopUnavailableReason = 'advanced' | 'messaging' | 'terminal'
 
 /**
  * How the desktop fulfils a command. This is the single discriminator the
@@ -110,6 +116,45 @@ const DESKTOP_COMMAND_SPECS: readonly DesktopCommandSpec[] = [
     surface: action('browser'),
     args: true
   },
+  // Settings commands — mirrored from ui-tui/.../slash/commands/session.ts.
+  // Each one drives `config.set` / `config.get` on the gateway so the live
+  // session picks up the new value (and any side effect like transcript
+  // clear for /personality) without restart.
+  {
+    name: '/reasoning',
+    description: 'Inspect or set reasoning effort (updates live agent)',
+    surface: action('reasoning'),
+    args: true
+  },
+  {
+    name: '/fast',
+    description: 'Toggle fast mode [normal|fast|status|on|off|toggle]',
+    surface: action('fast'),
+    args: true
+  },
+  {
+    name: '/busy',
+    description: 'Control busy enter mode [queue|steer|interrupt|status]',
+    surface: action('busy'),
+    args: true
+  },
+  {
+    name: '/voice',
+    description: 'Voice mode [on|off|tts|status]',
+    surface: action('voice'),
+    args: true
+  },
+  {
+    // /verbose cycles verbose tool-output mode via config.set on the
+    // gateway. Mirrors ui-tui/.../slash/commands/session.ts:529. The TUI
+    // patchUiState call is purely a local re-render; the real effect is the
+    // gateway's session_id-scoped config update, which is exactly what the
+    // desktop needs too.
+    name: '/verbose',
+    description: 'Cycle verbose tool-output mode (updates live agent)',
+    surface: action('verbose'),
+    args: true
+  },
 
   // Overlay pickers
   { name: '/model', description: 'Switch the model for this session', surface: picker('model'), hidden: true },
@@ -124,39 +169,56 @@ const DESKTOP_COMMAND_SPECS: readonly DesktopCommandSpec[] = [
   // Backend-executed commands that render useful inline output
   { name: '/agents', description: 'Show active desktop sessions and running tasks', aliases: ['/tasks'], surface: exec() },
   { name: '/background', description: 'Run a prompt in the background', aliases: ['/bg', '/btw'], surface: exec() },
-  { name: '/compress', description: 'Compress this conversation context', surface: exec() },
+  { name: '/compress', description: 'Compress this conversation context', surface: action('compress'), args: true },
   { name: '/debug', description: 'Create a debug report', surface: exec() },
   { name: '/goal', description: 'Manage the standing goal for this session', surface: exec() },
+  { name: '/history', description: 'View the current transcript (user + assistant messages)', surface: exec() },
+  { name: '/image', description: 'Attach an image to the next turn', surface: exec(), args: true },
+  { name: '/logs', description: 'View gateway logs', surface: exec(), args: true },
   { name: '/personality', description: 'Switch personality for this session', surface: exec(), args: true },
+  { name: '/platforms', description: 'Browse connected messaging platforms', surface: exec() },
+  { name: '/plugins', description: 'Browse loaded plugins', surface: exec() },
   { name: '/queue', description: 'Queue a prompt for the next turn', aliases: ['/q'], surface: exec() },
+  { name: '/reload', description: 'Re-read ~/.hermes/.env into the running gateway', surface: exec() },
+  // /reload-mcp and /reload-skills are simple `slash.exec` round-trips —
+  // they hit the gateway's reload.mcp / skills.reload RPC and return text.
+  // The TUI exposes both in its popover (ui-tui/.../slash/commands/ops.ts:85
+  // and :446) so users can re-scan MCP/skills without restarting. Gating
+  // them on the desktop meant typing `/reload-mcp` returned an "only
+  // available in the terminal interface" stub — which is the "no business
+  // being a thing" case: the command exists, it's safe, the gateway handles
+  // it. So route it through the slash worker like `/agents` and `/tools`.
+  { name: '/reload-mcp', description: 'Reload MCP servers in the live session', aliases: ['/reload_mcp'], surface: exec(), args: true },
+  { name: '/reload-skills', description: 'Re-scan installed skills in the live gateway', aliases: ['/reload_skills'], surface: exec() },
   { name: '/retry', description: 'Retry the last user message', surface: exec() },
   { name: '/rollback', description: 'List or restore filesystem checkpoints', surface: exec() },
   { name: '/save', description: 'Save the current transcript to JSON', surface: exec() },
+  // /skills is reachable from the desktop sidebar AND via /skills browse …
+  // through the slash worker. The previous `settings: managed from sidebar`
+  // gate blocked the inline-arg forms (search, inspect, install, …) which
+  // is exactly the user-installed-skills gap the parity push targets.
+  { name: '/skills', description: 'Browse, inspect, or install skills', surface: exec(), args: true },
   { name: '/status', description: 'Show current session status', surface: exec() },
   { name: '/steer', description: 'Steer the current run after the next tool call', surface: exec() },
   { name: '/stop', description: 'Stop running background processes', surface: exec() },
   { name: '/tools', description: 'List or toggle tools available to the agent', surface: exec(), args: true },
   { name: '/undo', description: 'Remove the last user/assistant exchange', surface: exec() },
   { name: '/usage', description: 'Show token usage for this session', surface: exec() },
-  { name: '/version', description: 'Show Hermes Agent version', surface: exec() },
-
-  // No desktop surface, but carry an alias (underscore spelling variants).
-  { name: '/reload-mcp', aliases: ['/reload_mcp'], surface: unavailable('advanced') },
-  { name: '/reload-skills', aliases: ['/reload_skills'], surface: unavailable('advanced') }
+  { name: '/version', description: 'Show Hermes Agent version', surface: exec() }
 ]
 
-// Known commands with no desktop surface (and no alias) — a flat name list
-// per reason beats 40 identical object literals.
+// Genuinely terminal-only commands: they manipulate the Ink TTY itself
+// (mouse tracking, status bar position, snap/snapshot, full repaint) or
+// close the process. These have NO equivalent on the desktop and any
+// attempt to render their TUI output in the chat panel would be a lie.
 const NO_DESKTOP_SURFACE: Record<DesktopUnavailableReason, readonly string[]> = {
   terminal: [
-    '/busy', '/clear', '/compact', '/config', '/copy', '/cron', '/details',
-    '/exit', '/footer', '/gateway', '/history', '/image', '/indicator', '/logs',
-    '/mouse', '/paste', '/platforms', '/plugins', '/quit', '/redraw', '/reload', '/restart',
-    '/sb', '/set-home', '/sethome', '/snap', '/snapshot', '/statusbar', '/toolsets', '/update', '/verbose'
+    '/clear', '/compact', '/copy', '/details',
+    '/exit', '/footer', '/gateway', '/indicator', '/mouse', '/paste', '/quit', '/redraw', '/restart',
+    '/sb', '/set-home', '/sethome', '/snap', '/snapshot', '/statusbar', '/toolsets', '/update'
   ],
   messaging: ['/approve', '/deny'],
-  settings: ['/skills'],
-  advanced: ['/curator', '/fast', '/insights', '/kanban', '/reasoning', '/voice']
+  advanced: ['/curator', '/insights', '/kanban']
 }
 
 const ALL_SPECS: readonly DesktopCommandSpec[] = [
@@ -176,7 +238,6 @@ const UNAVAILABLE_MESSAGE: Record<DesktopUnavailableReason, (command: string) =>
   advanced: command =>
     `${command} is not shown in the desktop slash palette. Use the relevant desktop control or terminal interface instead.`,
   messaging: command => `${command} is only used from messaging platforms.`,
-  settings: command => `${command} is managed from the desktop sidebar.`,
   terminal: command => `${command} is only available in the terminal interface.`
 }
 

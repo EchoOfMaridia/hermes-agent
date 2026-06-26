@@ -1479,6 +1479,30 @@ export interface Translations {
     promptFailed: string
     providerCredentialRequired: string
     emptySlashCommand: string
+    slashNoActiveAgent: string
+    compressRunning: string
+    // Mirrored from ui-tui/.../slash/commands/session.ts. Status-line
+    // text for /reasoning, /fast, /busy, /voice — kept in the desktop
+    // bundle so the popover and command center render in the user's
+    // locale.
+    reasoningStatus: (value: string, display: string) => string
+    reasoningSet: (value: string) => string
+    fastStatus: (mode: 'fast' | 'normal') => string
+    fastSet: (mode: 'fast' | 'normal') => string
+    busyStatus: (mode: string) => string
+    busySet: (mode: string) => string
+    voiceStatusHeader: string
+    voiceModeLine: (mode: 'ON' | 'OFF') => string
+    voiceTtsLine: (mode: 'ON' | 'OFF') => string
+    voiceRecordKeyLine: (binding: string) => string
+    voiceRequirementsHeader: string
+    voiceEnabled: (tts: boolean) => string
+    voiceEnabledRecordHint: (binding: string) => string
+    voiceEnabledTtsHint: string
+    voiceEnabledOffHint: string
+    voiceDisabled: string
+    voiceTtsEnabled: string
+    voiceTtsDisabled: string
     desktopCommands: string
     skillCommandsAvailable: (count: number) => string
     warningLine: (message: string) => string

@@ -782,37 +782,45 @@ export function useMessageStream({
           }))
         }
 
-        if (apply) {
-          if (runningChanged && sessionId) {
-            updateSessionState(sessionId, state => {
-              const busy = Boolean(payload!.running)
+        // runningChanged must propagate to background sessions too, not just
+        // the active one. Otherwise a turn that completes while another chat
+        // is foregrounded keeps the sidebar's "working" animation pinned
+        // indefinitely until the 8-min watchdog reaps it (the "sidebar stuck
+        // showing Thinking after I switched away" report). The state patch
+        // above already fires unconditionally; the busy patch should too.
+        // isActiveEvent continues to gate the view-store side effects (model,
+        // cwd, usage, statusbar pills) which legitimately only run for the
+        // focused session — not the per-session busy flag, which is the
+        // sidebar's source of truth across all rows.
+        if (runningChanged && sessionId) {
+          updateSessionState(sessionId, state => {
+            const busy = Boolean(payload!.running)
 
-              if (state.busy === busy && (busy || !state.awaitingResponse)) {
-                return state
-              }
+            if (state.busy === busy && (busy || !state.awaitingResponse)) {
+              return state
+            }
 
-              if (busy) {
-                return {
-                  ...state,
-                  busy,
-                  turnStartedAt: state.turnStartedAt ?? Date.now()
-                }
-              }
-
-              if (state.awaitingResponse && !state.sawAssistantPayload) {
-                return state
-              }
-
+            if (busy) {
               return {
                 ...state,
-                awaitingResponse: false,
                 busy,
-                pendingBranchGroup: null,
-                streamId: null,
-                turnStartedAt: null
+                turnStartedAt: state.turnStartedAt ?? Date.now()
               }
-            })
-          }
+            }
+
+            if (state.awaitingResponse && !state.sawAssistantPayload) {
+              return state
+            }
+
+            return {
+              ...state,
+              awaitingResponse: false,
+              busy,
+              pendingBranchGroup: null,
+              streamId: null,
+              turnStartedAt: null
+            }
+          })
         }
 
         if (payload?.usage && (!explicitSid || isActiveEvent)) {
