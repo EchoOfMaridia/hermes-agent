@@ -52,6 +52,93 @@ _DISCORD_COMMAND_SYNC_POLICIES = {"safe", "bulk", "off"}
 _DISCORD_COMMAND_SYNC_MAX_STALE_SECONDS = int(
     os.getenv("DISCORD_COMMAND_SYNC_MAX_STALE_SECONDS", str(24 * 3600))
 )
+# Minimum delay between forced re-syncs triggered by signature-mismatch
+# errors.  Bursts of mismatched commands (one user clicking 5 commands in
+# quick succession, or 5 users each hitting one) must NOT spawn 5 Discord
+# API rate-limit-bound sync requests — coalesce into one.
+_DISCORD_COMMAND_SYNC_FORCED_COALESCE_SECONDS = int(
+    os.getenv("DISCORD_COMMAND_SYNC_FORCED_COALESCE_SECONDS", str(30))
+)
+
+
+# Module-level guard for the self-healing force-resync.  When
+# ``CommandSignatureMismatch`` fires from discord.py, multiple invocations
+# in quick succession must share one resync — we hold an asyncio.Event
+# representing "a resync is already in flight" plus a timestamp of the
+# last successful force-resync.  This pair lets concurrent error
+# callbacks coalesce into one API call.
+_force_resync_in_flight: Dict[str, "asyncio.Event"] = {}
+_force_resync_last_run: Dict[str, float] = {}
+_force_resync_lock = threading.Lock()
+
+
+async def _force_slash_command_resync(adapter: Any) -> Dict[str, int]:
+    """Force an immediate re-sync of Discord slash commands, bypassing
+    the staleness skip window.  Used as the runtime self-heal for the
+    2026-06-26 ``/steer`` ``CommandSignatureMismatch`` incident, where
+    Discord's cached command definitions diverged from the adapter's
+    view and the fingerprint-based skip prevented reconciliation.
+
+    Coalesces concurrent callers within
+    ``_DISCORD_COMMAND_SYNC_FORCED_COALESCE_SECONDS``: if a resync is
+    already in flight, or a recent resync just finished, callers
+    wait on the in-flight task or short-circuit.
+
+    Returns the same summary dict as ``_safe_sync_slash_commands``
+    (unchanged / updated / created / deleted counts).
+    """
+    empty_summary: Dict[str, int] = {"total": 0, "unchanged": 0, "updated": 0, "recreated": 0, "created": 0, "deleted": 0}
+    app_id = (
+        getattr(adapter._client, "application_id", None)
+        if getattr(adapter, "_client", None)
+        else None
+    )
+    if not app_id:
+        return empty_summary
+    key = str(app_id)
+
+    # Decide whether this caller wins the race to start the resync.
+    # - In-flight -> wait on the existing event
+    # - Recently completed (within coalesce window) -> short-circuit
+    # - Otherwise -> we start the resync
+    wait_event: Optional[asyncio.Event] = None
+    should_start = False
+    new_event: Optional[asyncio.Event] = None
+    with _force_resync_lock:
+        in_flight = _force_resync_in_flight.get(key)
+        if in_flight is not None:
+            wait_event = in_flight
+        else:
+            last_run = _force_resync_last_run.get(key, 0.0)
+            if (time.time() - last_run) < _DISCORD_COMMAND_SYNC_FORCED_COALESCE_SECONDS:
+                # Recent resync; don't spawn another.
+                return empty_summary
+            new_event = asyncio.Event()
+            _force_resync_in_flight[key] = new_event
+            should_start = True
+
+    if not should_start:
+        # Another caller is running the resync — wait for it to finish
+        # and return its result.  wait_event is guaranteed non-None
+        # here because should_start was False.
+        assert wait_event is not None
+        await wait_event.wait()
+        result = _force_resync_last_run.get(f"{key}:result")
+        if isinstance(result, dict):
+            return result
+        return empty_summary
+
+    # We won the race: do the actual resync.
+    assert new_event is not None
+    try:
+        summary = await adapter._safe_sync_slash_commands()
+        _force_resync_last_run[key] = time.time()
+        _force_resync_last_run[f"{key}:result"] = summary
+        return summary
+    finally:
+        with _force_resync_lock:
+            _force_resync_in_flight.pop(key, None)
+        new_event.set()
 _DISCORD_COMMAND_SYNC_STATE_SUBDIR = "gateway"
 _DISCORD_COMMAND_SYNC_STATE_FILENAME = "discord_command_sync_state.json"
 _DISCORD_NONCONVERSATIONAL_STATE_FILENAME = "discord_nonconversational_messages.json"
@@ -1781,6 +1868,86 @@ class DiscordAdapter(BasePlatformAdapter):
             "description": canonical["description"],
             "options": canonical["options"],
         }
+
+    def _install_slash_command_error_handler(self, tree: Any) -> None:
+        """Install the tree.on_error handler that self-heals slash-command
+        signature drift (the 2026-06-26 /steer ``CommandSignatureMismatch``
+        incident).  Extracted as a method so tests can install it on a
+        mock tree without invoking the full ``_register_slash_commands``
+        path.
+
+        Behavior:
+        - Only acts on ``CommandSignatureMismatch`` (signature drift).
+          All other ``AppCommandError`` types fall through to discord.py's
+          default handler.
+        - Forces an immediate re-sync via ``_force_slash_command_resync``,
+          which bypasses the staleness-skip window.
+        - Coalesces concurrent mismatches so a burst (one user clicking
+          5 commands; 5 users each hitting one) doesn't spawn 5 API calls.
+        - Sends a single ephemeral followup explaining what happened.
+
+        Defensive: if the tree doesn't expose ``.error`` (e.g. a test
+        FakeTree), skip the install rather than crashing.  Real
+        discord.py CommandTree always has ``.error``.
+        """
+        if not hasattr(tree, "error") or not callable(getattr(tree, "error", None)):
+            logger.debug(
+                "[%s] Tree has no error() decorator; skipping on_error install",
+                self.name,
+            )
+            return
+        @tree.error
+        async def _on_slash_command_error(
+            interaction: Any, error: BaseException,
+        ) -> None:
+            from discord.app_commands import CommandSignatureMismatch
+            if not isinstance(error, CommandSignatureMismatch):
+                # Not a signature drift — let discord.py's default handler
+                # log it.  We don't try to be clever about other errors.
+                return
+            command_name = (
+                getattr(getattr(interaction, "command", None), "name", "<unknown>")
+            )
+            logger.warning(
+                "[%s] Slash command signature mismatch for /%s — forcing immediate re-sync",
+                self.name, command_name,
+            )
+            # Fire-and-forget the resync (don't block the error response)
+            try:
+                await _force_slash_command_resync(self)
+            except Exception as exc:
+                logger.debug(
+                    "[%s] Force-resync after signature mismatch failed: %s",
+                    self.name, exc,
+                )
+            # Reply to the user so they know something happened and
+            # aren't left staring at Discord's "The application did
+            # not respond" message.
+            try:
+                response = getattr(interaction, "response", None)
+                if response is not None and not response.is_done():
+                    await response.send_message(
+                        content=(
+                            f"Slash command signature drift detected for /{command_name}. "
+                            "Reconciling with Discord now — please retry in a few seconds."
+                        ),
+                        ephemeral=True,
+                    )
+                else:
+                    followup = getattr(interaction, "followup", None)
+                    if followup is not None:
+                        await followup.send(
+                            content=(
+                                f"Slash command signature drift detected for /{command_name}. "
+                                "Reconciling with Discord now — please retry in a few seconds."
+                            ),
+                            ephemeral=True,
+                        )
+            except Exception as exc:
+                logger.debug(
+                    "[%s] Could not send user-facing signature-drift notice: %s",
+                    self.name, exc,
+                )
 
     async def _safe_sync_slash_commands(self) -> Dict[str, int]:
         """Diff existing global commands and only mutate the commands that changed."""
@@ -4262,6 +4429,17 @@ class DiscordAdapter(BasePlatformAdapter):
                 _DISCORD_MAX_APP_COMMANDS,
                 dropped_over_cap,
             )
+
+        # ── tree.on_error: self-heal signature drift ──────────────────────
+        # When Discord's cached command definitions diverge from our local
+        # tree (e.g. the ``discord_command_sync.py`` skill pushed ``arg``
+        # while we expect ``prompt``), every slash invocation raises
+        # ``CommandSignatureMismatch``. discord.py surfaces this to the
+        # global ``tree.on_error`` handler — we use that as the signal
+        # to force an immediate re-sync, bypassing the staleness skip
+        # window.  Coalesced via ``_force_slash_command_resync`` so a
+        # burst of mismatches only triggers one Discord API call.
+        self._install_slash_command_error_handler(tree)
 
         # Optional defense-in-depth: hide every slash command from non-admin
         # guild members in Discord's slash picker. Server-side authorization
