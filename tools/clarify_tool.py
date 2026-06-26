@@ -20,6 +20,33 @@ from typing import List, Optional, Callable
 MAX_CHOICES = 4
 
 
+def _flatten_outer_lists(choices):
+    """Flatten one level of list nesting before per-choice normalisation.
+
+    LLMs sometimes wrap choices in an extra list (``choices=[["a", "b", "c"]]``
+    instead of ``choices=["a", "b", "c"]``) — a single-element outer list
+    containing all the options. Without this pass, the per-element loop
+    below would treat the inner list as ONE choice and `_flatten_choice`
+    used to join its items with spaces, producing a single concatenated
+    string for the UI to render as one row instead of three. Bug report
+    (bigwang agent, 2026-06-26): the user saw one button labelled
+    "Approve and ship Approve but skip the build verify (I trust the
+    schema) Change something first" instead of three separate rows.
+
+    Strings inside the inner list are preserved; nested-list elements are
+    re-flattened up to one additional level. Non-list elements pass through
+    untouched so the per-element `_flatten_choice` can still handle dicts
+    and other odd shapes.
+    """
+    out = []
+    for c in choices:
+        if isinstance(c, (list, tuple)):
+            out.extend(_flatten_outer_lists(list(c)))
+        else:
+            out.append(c)
+    return out
+
+
 def _flatten_choice(c) -> str:
     """Coerce a single choice into its user-facing display string.
 
@@ -37,6 +64,11 @@ def _flatten_choice(c) -> str:
     carry raw enum values or short identifiers, not human-readable labels. A
     dict with none of the canonical keys is dropped (returns ""), since a
     garbage label is worse than no choice at all.
+
+    Note: nested lists are unwrapped by `_flatten_outer_lists` BEFORE this
+    function is called per element — the historical ``(list, tuple)``
+    branch was removed because it would otherwise join the options with
+    spaces into a single display string (the bug above).
     """
     if c is None:
         return ""
@@ -48,9 +80,73 @@ def _flatten_choice(c) -> str:
             if isinstance(v, str) and v.strip():
                 return v.strip()
         return ""
-    if isinstance(c, (list, tuple)):
-        return " ".join(_flatten_choice(x) for x in c).strip()
     return str(c).strip()
+
+
+# Recognised callback response shapes. Anything else falls through to
+# "unresolved" so the agent sees a halt signal rather than inferring a
+# pick from arbitrary text.
+_RESPONSE_MODE_SELECTED = "selected"
+_RESPONSE_MODE_FREETEXT = "freetext"
+_RESPONSE_MODE_UNRESOLVED = "unresolved"
+_KNOWN_RESPONSE_MODES = {_RESPONSE_MODE_SELECTED, _RESPONSE_MODE_FREETEXT}
+
+
+def _resolve_response_mode(user_response, choices) -> tuple:
+    """Classify the callback's return value into a (mode, value) pair.
+
+    The wire contract:
+
+      - ``{"mode": "selected", "value": "<choice text>"}`` — the UI confirms
+        the user picked a specific offered choice. Returns
+        ``("selected", value)`` ONLY when ``value`` matches one of
+        ``choices`` exactly (substring matches are NOT accepted — the user
+        might be typing the start of a custom answer).
+
+      - ``{"mode": "freetext", "value": "<typed text>"}`` — the user
+        explicitly used the Other channel. Intent is acknowledged;
+        returns ``("freetext", value)``.
+
+      - Plain string — legacy callers (tests, oneshot fallback, anything
+        that doesn't have a structured UI). If the string matches an
+        offered choice exactly, treat as "selected" so the legacy path
+        still works. Otherwise "unresolved" — the agent MUST halt rather
+        than infer the most plausible pick.
+
+      - Any other shape (unknown mode dict, list, scalar, None) →
+        ``("unresolved", str(user_response).strip())`` so the agent can
+        see what came back without mistaking it for a pick.
+
+    Returns ``(mode_str, value_str)``. ``value_str`` is the canonical
+    text to surface to the agent (whitespace-stripped).
+    """
+    # Dict: structured UI contract.
+    if isinstance(user_response, dict):
+        mode = user_response.get("mode")
+        value = user_response.get("value", "")
+        if not isinstance(value, str):
+            value = str(value)
+        value = value.strip()
+        if mode == _RESPONSE_MODE_SELECTED and isinstance(choices, list) and value in choices:
+            return _RESPONSE_MODE_SELECTED, value
+        if mode == _RESPONSE_MODE_FREETEXT:
+            return _RESPONSE_MODE_FREETEXT, value
+        # Unknown mode or "selected" with a non-matching value — treat as
+        # unresolved. The caller tagged it incorrectly or it's noise.
+        return _RESPONSE_MODE_UNRESOLVED, value
+
+    # Plain string: legacy contract. Exact-match against offered choices
+    # counts as "selected" so older callers still get a coherent result.
+    if isinstance(user_response, str):
+        value = user_response.strip()
+        if isinstance(choices, list) and value in choices:
+            return _RESPONSE_MODE_SELECTED, value
+        return _RESPONSE_MODE_UNRESOLVED, value
+
+    # Anything else (None, int, list, ...): coerce to string, mark
+    # unresolved. The agent MUST halt rather than treat this as a pick.
+    value = str(user_response).strip() if user_response is not None else ""
+    return _RESPONSE_MODE_UNRESOLVED, value
 
 
 def clarify_tool(
@@ -86,6 +182,10 @@ def clarify_tool(
         # user-facing text here — the single platform-agnostic entry point —
         # so the CLI panel, Discord buttons, and Telegram list all render clean
         # text and the resolved answer is never a raw Python dict repr.
+        # Unwrap one level of list nesting (LLMs sometimes emit
+        # choices=[["a", "b", "c"]] instead of ["a", "b", "c"] — see
+        # _flatten_outer_lists for the bug this guards against).
+        choices = _flatten_outer_lists(choices)
         choices = [s for s in (_flatten_choice(c) for c in choices) if s]
         if len(choices) > MAX_CHOICES:
             choices = choices[:MAX_CHOICES]
@@ -99,17 +199,23 @@ def clarify_tool(
         )
 
     try:
-        user_response = callback(question, choices)
+        raw_response = callback(question, choices)
     except Exception as exc:
         return json.dumps(
             {"error": f"Failed to get user input: {exc}"},
             ensure_ascii=False,
         )
 
+    # Tag the response mode so the agent can distinguish a real pick from
+    # a freetext custom answer from a noisy non-answer (bug #2: agent
+    # treating absence of a real answer as implicit approval).
+    response_mode, user_response_value = _resolve_response_mode(raw_response, choices)
+
     return json.dumps({
         "question": question,
         "choices_offered": choices,
-        "user_response": str(user_response).strip(),
+        "user_response": user_response_value,
+        "user_response_mode": response_mode,
     }, ensure_ascii=False)
 
 
