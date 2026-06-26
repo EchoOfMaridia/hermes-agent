@@ -229,6 +229,117 @@ class TestClarifyDictChoices:
         assert all("{" not in c for c in result["choices_offered"])
 
 
+class TestClarifyNestedChoices:
+    """Nested-list choices must not collapse to a single space-joined string.
+
+    LLMs sometimes emit `choices=[["a", "b", "c"]]` (a list with one nested
+    list) instead of `choices=["a", "b", "c"]`. _flatten_choice used to
+    flatten the inner list via `" ".join(...)`, producing a single combined
+    string per outer element. The UI then rendered one row containing
+    "a b c" instead of three separate selectable rows. This test pins the
+    correct behavior: each leaf string must remain its own array element
+    so the rendering layer can show N pickable rows.
+
+    Bug report (bigwang agent, 2026-06-26): "When calling the `clarify` tool
+    with a `choices` array of multiple strings, the UI renders only one
+    option row containing all three strings concatenated together. The user
+    sees a single button labeled e.g. 'Approve and ship Approve but skip
+    the build verify (I trust the schema) Change something first' instead
+    of three separate selectable rows."
+    """
+
+    def test_flatten_outer_lists_unwraps_one_level(self):
+        from tools.clarify_tool import _flatten_outer_lists
+
+        # The reported symptom: a single-element list of strings
+        # (choices=[["Approve and ship", ...]]) — the outer wrap must be
+        # peeled off so each leaf becomes its own choice.
+        assert _flatten_outer_lists(
+            [["Approve and ship", "Approve but skip", "Change something first"]]
+        ) == ["Approve and ship", "Approve but skip", "Change something first"]
+
+    def test_flatten_outer_lists_unwraps_double_nested_to_flat(self):
+        from tools.clarify_tool import _flatten_outer_lists
+
+        # choices=[["a", "b"], ["c", "d"]] is two outer items each with two
+        # inner strings — flatten to four flat strings.
+        assert _flatten_outer_lists([["a", "b"], ["c", "d"]]) == ["a", "b", "c", "d"]
+
+    def test_flatten_outer_lists_mixes_lists_and_strings(self):
+        from tools.clarify_tool import _flatten_outer_lists
+
+        # Mixed input: a dict-shaped choice (handled later by
+        # _flatten_choice) next to a list of strings next to a bare string.
+        # _flatten_outer_lists only unwraps list layers; it leaves non-list
+        # elements alone so the per-element normalisation can do its job.
+        result = _flatten_outer_lists([
+            "plain string",
+            ["a", "b"],
+            {"label": "dict choice"},
+        ])
+        assert result == ["plain string", "a", "b", {"label": "dict choice"}]
+
+    def test_nested_choices_reach_callback_as_separate_rows(self):
+        """Reproduce the bug report's exact symptom.
+
+        The LLM emitted choices as a single-element list containing the
+        options: `choices=[["Approve and ship", "Approve but skip ...", "Change something first"]]`.
+        The current code flattens this to one space-joined string per
+        outer element, producing a single-element choices_offered. The
+        fix must flatten to N separate strings.
+        """
+        seen = []
+
+        def cb(question, choices):
+            seen.extend(choices or [])
+            return choices[0] if choices else ""
+
+        result = json.loads(clarify_tool(
+            "Pick action",
+            choices=[
+                [
+                    "Approve and ship",
+                    "Approve but skip the build verify (I trust the schema)",
+                    "Change something first",
+                ]
+            ],
+            callback=cb,
+        ))
+        # Exactly three rows visible to the UI, not one concatenated blob.
+        assert seen == [
+            "Approve and ship",
+            "Approve but skip the build verify (I trust the schema)",
+            "Change something first",
+        ]
+        assert result["choices_offered"] == [
+            "Approve and ship",
+            "Approve but skip the build verify (I trust the schema)",
+            "Change something first",
+        ]
+        # The reported bug's signature: a single-element array with the
+        # three options joined into one string. After the fix this MUST
+        # not happen for nested-list input either.
+        assert len(result["choices_offered"]) == 3
+        assert "{" not in result["user_response"]
+
+    def test_truly_nested_list_of_lists_still_flattens_to_strings(self):
+        # Defensive: if the LLM does pass choices=[["a", "b"], ["c"]],
+        # the callback should still see three distinct strings, not one
+        # combined blob per outer element.
+        seen = []
+
+        def cb(question, choices):
+            seen.extend(choices or [])
+            return "x"
+
+        clarify_tool(
+            "Pick",
+            choices=[["a", "b"], ["c"]],
+            callback=cb,
+        )
+        assert seen == ["a", "b", "c"]
+
+
 class TestClarifySchema:
     """Tests for the OpenAI function-calling schema."""
 
