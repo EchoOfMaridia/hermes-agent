@@ -515,26 +515,47 @@ def _is_method_not_found_error(exc: BaseException) -> bool:
 # Patterns that indicate potential prompt injection in MCP tool descriptions.
 # These are WARNING-level — we log but don't block, since false positives
 # would break legitimate MCP servers.
+#
+# Tighter than a naive keyword scan: every pattern must match an
+# *attack-shaped phrase*, not just any substring containing the word.
+# Example: "LOCAL FILE SYSTEM:" is a benign section header, NOT
+# role-prefix injection — pattern #4 used to fire on it because it
+# matched "SYSTEM:" anywhere.  Fixed by anchoring on a word boundary
+# before "system" and requiring lowercase, since attackers writing
+# role-prefix injections use lowercase ("system:") to look like a
+# real role tag, not section headings like "FILE SYSTEM:".
 _MCP_INJECTION_PATTERNS = [
-    (re.compile(r"ignore\s+(all\s+)?previous\s+instructions", re.I),
+    (re.compile(r"\bignore\s+(all\s+)?previous\s+instructions\b", re.I),
      "prompt override attempt ('ignore previous instructions')"),
-    (re.compile(r"you\s+are\s+now\s+a", re.I),
+    (re.compile(r"\byou\s+are\s+now\s+a\b", re.I),
      "identity override attempt ('you are now a...')"),
-    (re.compile(r"your\s+new\s+(task|role|instructions?)\s+(is|are)", re.I),
+    (re.compile(r"\byour\s+new\s+(task|role|instructions?)\s+(is|are)\b", re.I),
      "task override attempt"),
-    (re.compile(r"system\s*:\s*", re.I),
+    # Role-prefix injection: someone embedding a fake chat-template
+    # role tag inside a tool description.  The real attack shape is
+    # `system: <content>` at the start of a line (mimicking a JSONL
+    # role tag), NOT a section header like "LOCAL FILE SYSTEM:" mid-
+    # line.  Anchor to line start (^ with MULTILINE) and require
+    # content after the colon.  Lowercase OR TitleCase both flag —
+    # attackers don't always use lowercase.  SECTION HEADERS like
+    # "FILE SYSTEM:" mid-line won't match because they're not at
+    # line start.  "SYSTEM: " alone (just whitespace after colon)
+    # is borderline: in a tool description it's almost certainly a
+    # header; we require non-whitespace content to keep the false-
+    # positive rate low.
+    (re.compile(r"^\s*system\s*:\s*\S", re.M | re.I),
      "system prompt injection attempt"),
     (re.compile(r"<\s*(system|human|assistant)\s*>", re.I),
      "role tag injection attempt"),
-    (re.compile(r"do\s+not\s+(tell|inform|mention|reveal)", re.I),
+    (re.compile(r"\bdo\s+not\s+(tell|inform|mention|reveal)\b", re.I),
      "concealment instruction"),
-    (re.compile(r"(curl|wget|fetch)\s+https?://", re.I),
+    (re.compile(r"\b(curl|wget|fetch)\s+https?://", re.I),
      "network command in description"),
-    (re.compile(r"base64\.(b64decode|decodebytes)", re.I),
+    (re.compile(r"\bbase64\.(b64decode|decodebytes)\b", re.I),
      "base64 decode reference"),
-    (re.compile(r"exec\s*\(|eval\s*\(", re.I),
+    (re.compile(r"\bexec\s*\(|\beval\s*\(", re.I),
      "code execution reference"),
-    (re.compile(r"import\s+(subprocess|os|shutil|socket)", re.I),
+    (re.compile(r"\bimport\s+(subprocess|os|shutil|socket)\b", re.I),
      "dangerous import reference"),
 ]
 
