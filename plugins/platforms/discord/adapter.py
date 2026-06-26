@@ -41,6 +41,17 @@ class _Snowflake:
 
 VALID_THREAD_AUTO_ARCHIVE_MINUTES = {60, 1440, 4320, 10080}
 _DISCORD_COMMAND_SYNC_POLICIES = {"safe", "bulk", "off"}
+# Staleness threshold for the fingerprint-based sync skip.  When the
+# last successful sync is older than this, the gateway forces a re-sync
+# even when the fingerprint matches — this gives us a periodic
+# reconciliation against Discord's actual state, since the fingerprint
+# alone can lie when something else (the discord_command_sync.py skill,
+# manual edits in the Discord developer portal, etc.) has changed the
+# remote commands in between.  Default 24h; override via env var
+# DISCORD_COMMAND_SYNC_MAX_STALE_SECONDS.
+_DISCORD_COMMAND_SYNC_MAX_STALE_SECONDS = int(
+    os.getenv("DISCORD_COMMAND_SYNC_MAX_STALE_SECONDS", str(24 * 3600))
+)
 _DISCORD_COMMAND_SYNC_STATE_SUBDIR = "gateway"
 _DISCORD_COMMAND_SYNC_STATE_FILENAME = "discord_command_sync_state.json"
 _DISCORD_NONCONVERSATIONAL_STATE_FILENAME = "discord_nonconversational_messages.json"
@@ -1473,7 +1484,18 @@ class DiscordAdapter(BasePlatformAdapter):
             remaining = max(1, int(retry_after_until - now))
             return f"Discord asked us to wait before syncing slash commands; retry in {remaining}s"
         if entry.get("fingerprint") == fingerprint and entry.get("last_success_at"):
-            return "same slash-command fingerprint already synced"
+            # Time-bounded skip: even when the fingerprint matches, force a
+            # re-sync once the last successful sync is older than the
+            # staleness threshold.  The fingerprint alone can lie — another
+            # process (e.g. the discord_command_sync.py skill, or a manual
+            # edit in the Discord developer portal) can push changes between
+            # gateway restarts, leaving Discord in a divergent state.  A
+            # periodic reconciliation against Discord's actual command set
+            # closes that gap.
+            last_success_at = float(entry.get("last_success_at") or 0)
+            age = now - last_success_at
+            if age < _DISCORD_COMMAND_SYNC_MAX_STALE_SECONDS:
+                return "same slash-command fingerprint already synced"
         return None
 
     def _record_command_sync_attempt(self, app_id: Any, fingerprint: str) -> None:
