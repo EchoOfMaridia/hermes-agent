@@ -1918,6 +1918,8 @@ export const zhHant = defineLocale({
     // TODO(translate): replace English fallback with proper Traditional Chinese copy.
     slashNoActiveAgent: 'Send any message first, then try this command again.',
     // TODO(translate): replace English fallback with proper Traditional Chinese copy.
+    slashRoutedAsExec: 'This command is handled by the desktop — restart the app to refresh the renderer.',
+    // TODO(translate): replace English fallback with proper Traditional Chinese copy.
     compressRunning: 'Compressing conversation…',
     // TODO(translate): replace English fallback with proper Traditional Chinese copy.
     reasoningStatus: (value, display) => `reasoning: ${value} · display ${display}`,

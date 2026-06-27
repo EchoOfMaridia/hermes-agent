@@ -2024,6 +2024,8 @@ export const zh: Translations = {
     // TODO(translate): replace English fallback with proper Simplified Chinese copy.
     slashNoActiveAgent: 'Send any message first, then try this command again.',
     // TODO(translate): replace English fallback with proper Simplified Chinese copy.
+    slashRoutedAsExec: 'This command is handled by the desktop — restart the app to refresh the renderer.',
+    // TODO(translate): replace English fallback with proper Simplified Chinese copy.
     compressRunning: 'Compressing conversation…',
     // TODO(translate): replace English fallback with proper Simplified Chinese copy.
     reasoningStatus: (value, display) => `reasoning: ${value} · display ${display}`,

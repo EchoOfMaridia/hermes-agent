@@ -571,6 +571,216 @@ describe('usePromptActions slash.exec dispatch payloads', () => {
     // handler appends the summary, it doesn't replace the running line.
     expect(textAfter.toLowerCase()).toMatch(/compress/)
   })
+
+  it('NEVER routes /compress through slash.exec or command.dispatch — those paths emit the user-visible "not a quick/plugin/skill command: compress" error', async () => {
+    // The user-reported bug: typing /compress renders
+    //   /compress·error: not a quick/plugin/skill command: compress
+    // That error string is emitted by the gateway's command.dispatch RPC when
+    // it sees a command that isn't a user-defined quick/plugin/skill command.
+    // The desktop must NEVER let /compress reach command.dispatch — it has to
+    // go straight to session.compress via the action handler. This test pins
+    // that contract: /compress may ONLY call session.compress, regardless of
+    // what the slash worker or command.dispatch would have said.
+    //
+    // We mock both slash.exec AND command.dispatch to FAIL with the exact
+    // gateway error message the user reported. If the dispatcher ever routes
+    // /compress through either of those RPCs, the rendered transcript will
+    // contain "error: not a quick/plugin/skill command: compress" — and this
+    // test will fail with that string in the failure output.
+    const calls: { method: string; params?: Record<string, unknown> }[] = []
+    const states: Record<string, unknown>[] = []
+    const requestGateway = vi.fn(async (method: string, params?: Record<string, unknown>) => {
+      calls.push({ method, params })
+
+      if (method === 'session.compress') {
+        return {
+          status: 'compressed',
+          removed: 12,
+          before_messages: 30,
+          after_messages: 18,
+          summary: {
+            noop: false,
+            headline: 'Compressed: 30 → 18 messages',
+            token_line: '',
+            note: null
+          }
+        } as never
+      }
+
+      // If the dispatcher ever calls slash.exec or command.dispatch for
+      // /compress, simulate the gateway's exact rejection — this guarantees
+      // the test fails with the user-visible error string if the bug
+      // regresses, instead of a silent pass.
+      if (method === 'slash.exec' || method === 'command.dispatch') {
+        throw new Error('not a quick/plugin/skill command: compress')
+      }
+
+      return {} as never
+    })
+
+    let handle: HarnessHandle | null = null
+    render(
+      <Harness
+        onReady={h => (handle = h)}
+        onSeedState={s => states.push(s)}
+        refreshSessions={async () => undefined}
+        requestGateway={requestGateway}
+      />
+    )
+
+    await handle!.submitText('/compress')
+
+    // The dispatcher MUST route /compress to session.compress and to nothing
+    // else. slash.exec and command.dispatch are forbidden — those are the
+    // two RPCs that would surface the user-reported error.
+    expect(calls.map(c => c.method)).toEqual(['session.compress'])
+    expect(calls.some(c => c.method === 'slash.exec')).toBe(false)
+    expect(calls.some(c => c.method === 'command.dispatch')).toBe(false)
+
+    const renderedText = states
+      .flatMap(state => {
+        const messages = Array.isArray(state.messages)
+          ? (state.messages as Array<{ parts?: Array<{ text?: string }> }>)
+          : []
+
+        return messages.flatMap(message => (message.parts ?? []).map(part => part.text ?? ''))
+      })
+      .join('\n')
+
+    // The user-visible symptom — these strings MUST NOT appear.
+    expect(renderedText).not.toContain('not a quick/plugin/skill command')
+    expect(renderedText).not.toMatch(/^error:\s/m)   // "error:" prefix from runExec catch
+    expect(renderedText).not.toMatch(/\nerror:\s/)   // also catch mid-transcript
+    // The renderer's own compression-failed prefix is allowed only when
+    // session.compress itself throws — but here it succeeds, so no failure
+    // line should appear at all.
+    expect(renderedText).not.toContain('compression failed')
+    // The action handler's happy path output must appear.
+    expect(renderedText).toContain('Compressed: 30 → 18 messages')
+  })
+
+  it('renders session.compress errors with the "compression failed:" prefix, NOT the generic "error:" from runExec', async () => {
+    // Even if session.compress itself throws with a gateway-shaped error
+    // message (e.g. the gateway rejects because the session is busy), the
+    // rendered text MUST come from the action handler's catch block, which
+    // prefixes "compression failed:". The runExec catch prefix ("error:")
+    // would prove the dispatcher routed /compress through the slash worker
+    // instead of the action handler.
+    const states: Record<string, unknown>[] = []
+    const requestGateway = vi.fn(async (method: string) => {
+      if (method === 'session.compress') {
+        throw new Error('not a quick/plugin/skill command: compress')
+      }
+
+      return {} as never
+    })
+
+    let handle: HarnessHandle | null = null
+    render(
+      <Harness
+        onReady={h => (handle = h)}
+        onSeedState={s => states.push(s)}
+        refreshSessions={async () => undefined}
+        requestGateway={requestGateway}
+      />
+    )
+
+    await handle!.submitText('/compress')
+
+    const renderedText = states
+      .flatMap(state => {
+        const messages = Array.isArray(state.messages)
+          ? (state.messages as Array<{ parts?: Array<{ text?: string }> }>)
+          : []
+
+        return messages.flatMap(message => (message.parts ?? []).map(part => part.text ?? ''))
+      })
+      .join('\n')
+
+    // The action handler's catch block emits "compression failed: …". The
+    // runExec catch block emits "error: …". These are different prefixes —
+    // only the first is correct for /compress.
+    expect(renderedText).toContain('compression failed:')
+    expect(renderedText).not.toMatch(/\berror:\s/)  // runExec's bare "error:" prefix
+    expect(renderedText).not.toMatch(/^\/compress\b.*\berror:/m)
+  })
+
+  it('translates the gateway "not a quick/plugin/skill command: <name>" rejection into a desktop hint instead of echoing it verbatim', async () => {
+    // Defense in depth: even if some future regression or alias re-dispatch
+    // slips a state-aware command (like /compress) into runExec's
+    // command.dispatch fallback, the chat panel must NOT show the gateway's
+    // literal rejection string ("not a quick/plugin/skill command: compress").
+    // Translate it to the desktop's slashRoutedAsExec hint so the user
+    // understands their command reached the wrong code path.
+    //
+    // We force this path by making /compress route through runExec (the old
+    // exec() surface) and rejecting command.dispatch with the gateway's
+    // exact error. This simulates the stale-dist scenario where the bundle
+    // pre-dates the action-handler migration.
+    const states: Record<string, unknown>[] = []
+    const requestGateway = vi.fn(async (method: string) => {
+      // slash.exec rejects too — this forces the runExec fallback into the
+      // command.dispatch path.
+      if (method === 'slash.exec') {
+        throw new Error('slash worker offline')
+      }
+      // command.dispatch rejects with the exact gateway error string.
+      if (method === 'command.dispatch') {
+        throw new Error('not a quick/plugin/skill command: compress')
+      }
+
+      return {} as never
+    })
+
+    // Temporarily neutralize the action handler reroute by patching the
+    // registry. This forces the dispatcher through the runExec fallback
+    // path even though /compress has surface: action('compress') in source.
+    const registryModule = await import('@/lib/desktop-slash-commands')
+    const originalResolve = registryModule.resolveDesktopCommand
+    const spy = vi.spyOn(registryModule, 'resolveDesktopCommand').mockImplementation(cmd => {
+      const spec = originalResolve(cmd)
+      if (!spec) return spec
+      // Pretend /compress is still an exec surface (the pre-fix state) so
+      // the dispatcher routes it to runExec. This reproduces the stale-bundle
+      // scenario the user actually hit.
+      if (cmd === '/compress') {
+        return { ...spec, surface: { kind: 'exec' as const } }
+      }
+
+      return spec
+    })
+
+    try {
+      let handle: HarnessHandle | null = null
+      render(
+        <Harness
+          onReady={h => (handle = h)}
+          onSeedState={s => states.push(s)}
+          refreshSessions={async () => undefined}
+          requestGateway={requestGateway}
+        />
+      )
+
+      await handle!.submitText('/compress')
+
+      const renderedText = states
+        .flatMap(state => {
+          const messages = Array.isArray(state.messages)
+            ? (state.messages as Array<{ parts?: Array<{ text?: string }> }>)
+            : []
+
+          return messages.flatMap(message => (message.parts ?? []).map(part => part.text ?? ''))
+        })
+        .join('\n')
+
+      // The gateway's literal rejection string must NOT appear anywhere.
+      expect(renderedText).not.toContain('not a quick/plugin/skill command')
+      // The desktop hint must replace it.
+      expect(renderedText.toLowerCase()).toContain('restart')
+    } finally {
+      spy.mockRestore()
+    }
+  })
 })
 
 // `/reasoning`, `/fast`, `/busy`, and `/voice` all drive `config.get` /

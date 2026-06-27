@@ -386,6 +386,23 @@ function isNoActiveAgentSentinel(value: string | undefined): boolean {
   return typeof value === 'string' && NO_ACTIVE_AGENT_SENTINEL_RE.test(value)
 }
 
+// Sentinel for the gateway's command.dispatch rejection — emitted at
+// tui_gateway/server.py:9381 when command.dispatch receives a name that is not
+// a user-defined quick / plugin / skill command. State-aware commands like
+// /compress and /goal have action handlers in the desktop dispatcher
+// (resolveDesktopCommand('${cmd}').surface.kind === 'action') and MUST NOT
+// reach command.dispatch. If they ever do — through a stale bundle, an alias
+// re-dispatch, a future dispatcher regression, or a future contributor who
+// forgets the runSlash switch — surface a desktop-side hint instead of the
+// gateway's literal rejection string. Without this translation, the chat
+// panel renders `error: not a quick/plugin/skill command: compress` which
+// looks like a hard crash to the user even though their command is fine.
+const NOT_A_QUICK_PLUGIN_SKILL_SENTINEL_RE = /not a quick\/plugin\/skill command/i
+
+function isNotAQuickPluginSkillSentinel(value: string | undefined): boolean {
+  return typeof value === 'string' && NOT_A_QUICK_PLUGIN_SKILL_SENTINEL_RE.test(value)
+}
+
 function appendText(message: AppendMessage): string {
   return message.content
     .map(part => ('text' in part ? part.text : ''))
@@ -1050,6 +1067,20 @@ export function usePromptActions({
 
           await handleDispatch(dispatch)
         } catch (err) {
+          // Defense in depth — the runSlash switch routes action commands
+          // to their action handlers, but if any future regression or
+          // alias re-dispatch slips a state-aware command like /compress
+          // into runExec's command.dispatch fallback, the gateway emits
+          // "not a quick/plugin/skill command: <name>". That literal
+          // rejection string in the chat panel looks like a hard crash
+          // to the user even though the command is fine. Translate it
+          // into a desktop-side hint that explains how to recover.
+          if (isNotAQuickPluginSkillSentinel(err instanceof Error ? err.message : String(err))) {
+            renderSlashOutput(copy.slashRoutedAsExec)
+
+            return
+          }
+
           renderSlashOutput(`error: ${err instanceof Error ? err.message : String(err)}`)
         }
       }

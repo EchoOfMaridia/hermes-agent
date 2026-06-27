@@ -1480,6 +1480,7 @@ export interface Translations {
     providerCredentialRequired: string
     emptySlashCommand: string
     slashNoActiveAgent: string
+    slashRoutedAsExec: string
     compressRunning: string
     // Mirrored from ui-tui/.../slash/commands/session.ts. Status-line
     // text for /reasoning, /fast, /busy, /voice — kept in the desktop
