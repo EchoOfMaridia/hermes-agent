@@ -248,6 +248,10 @@ export const $currentCwd = atom(getRememberedWorkspaceCwd())
 export const $currentBranch = atom('')
 export const $currentUsage = atom<UsageStats>({
   calls: 0,
+  context_max: undefined,
+  context_percent: undefined,
+  context_used: undefined,
+  cost_usd: undefined,
   input: 0,
   output: 0,
   total: 0

@@ -45,13 +45,13 @@ class _FakeAgent:
         self.platform = "cli"
         self.quiet_mode = True
         self.max_iterations = 90
-        self.tools = []
-        self.valid_tool_names = set()
+        self.tools: list = []
+        self.valid_tool_names: set = set()
         self.enabled_toolsets = None
         self.disabled_toolsets = None
         self._skip_mcp_refresh = False
         self.compression_enabled = False
-        self.context_compressor = types.SimpleNamespace(
+        self.context_compressor: object = types.SimpleNamespace(
             protect_first_n=2, protect_last_n=2
         )
         self._cached_system_prompt = "SYSTEM"
@@ -258,4 +258,211 @@ def test_between_turns_refresh_no_churn_when_unchanged():
         _build(agent)
 
     assert agent.tools is same  # not replaced → no churn
+
+
+# ── Preflight rough-estimate must be clamped to context_length ────────────
+#
+# Bug screenshot evidence (desktop statusbar reading 3.1M/1.0M on a small
+# session): the preflight branch at agent/turn_context.py:310-314 was
+# assigning ``_compressor.last_prompt_tokens = _preflight_tokens`` with no
+# upper bound. The rough estimate is derived from
+# ``len(system_prompt) // 4 + len(tools) // 4 + message chars // 4`` and can
+# grow well past the model context window with 50+ tools enabled. That value
+# then propagated to the desktop statusbar via
+# ``tui_gateway._get_usage()`` (``context_used = last_prompt_tokens``) and
+# rendered as "3.1M/1.0M (100%)" — wildly wrong.
+#
+# The seed-to-display intent (PR #413) is preserved: preflight IS allowed
+# to revise ``last_prompt_tokens`` upward when it's a better signal than the
+# stale provider value. The fix is the clamp: rough estimates never exceed
+# the model's actual context window. Tests pin both halves of the contract
+# — clamped upward revision is allowed, unbounded upward revision is not.
+
+
+class _FakeCompressor:
+    """Compressor double exposing exactly the fields the preflight branch
+    reads. ``should_compress`` / ``should_defer_preflight_to_real_usage`` are
+    monkey-patched per-test so the rough estimate can be controlled without
+    touching the real ContextCompressor.
+    """
+
+    def __init__(self, last_prompt_tokens=0, context_length=1_000_000):
+        self.protect_first_n = 2
+        self.protect_last_n = 2
+        self.last_prompt_tokens = last_prompt_tokens
+        self.last_real_prompt_tokens = last_prompt_tokens
+        self.threshold_tokens = 85_000
+        self.context_length = context_length
+        self.compress_calls = 0
+        self.should_compress_calls: list = []
+
+    def should_defer_preflight_to_real_usage(self, _tokens):
+        return False
+
+    def should_compress(self, _tokens):
+        return False  # default: never compress; tests that need to compress override
+
+    def _compress_marker(self):
+        # Marker method to detect "did preflight call into us?" — not used by
+        # build_turn_context, just here for test instrumentation.
+        self.compress_calls += 1
+
+
+def _build_with_compressor(agent, conversation_history):
+    """Wrap _build so the compressor is wired up and the preflight branch
+    is actually entered. Returns the resulting TurnContext."""
+    return _build(
+        agent,
+        conversation_history=conversation_history,
+    )
+
+
+def test_preflight_clamps_rough_estimate_to_context_length():
+    """Regression for the 3.1M/1.0M statusbar bug: a rough estimate that
+    exceeds the model's context window must be clamped to that ceiling
+    before being assigned to ``last_prompt_tokens``."""
+    agent = _FakeAgent()
+    agent.compression_enabled = True
+    # 1M context window — same model the bug screenshot was using.
+    agent.context_compressor = _FakeCompressor(
+        last_prompt_tokens=50_000, context_length=1_000_000
+    )
+    agent.tools = [{"type": "function", "function": {"name": "huge"}}] * 80  # 80 tools
+    agent._cached_system_prompt = "X" * 200_000  # 200KB system prompt
+
+    history = [
+        {"role": "user", "content": "x"},
+        {"role": "assistant", "content": "y"},
+        {"role": "user", "content": "x"},
+        {"role": "assistant", "content": "y"},
+        {"role": "user", "content": "x"},
+        {"role": "assistant", "content": "y"},
+    ]
+
+    # Patch estimate_request_tokens_rough to return the bug-screenshot
+    # value: 3.1M tokens, exceeding the 1M context window.
+    with patch(
+        "agent.turn_context.estimate_request_tokens_rough",
+        return_value=3_100_000,
+    ):
+        _build_with_compressor(agent, history)
+
+    # The fix: rough estimate is clamped to context_length (1M), so the
+    # value seeded into last_prompt_tokens is bounded — the desktop
+    # statusbar can no longer display "3.1M/1.0M (310%)".
+    assert agent.context_compressor.last_prompt_tokens == 1_000_000, (
+        f"preflight must clamp rough estimate to context_length; "
+        f"expected 1_000_000 (context window), got {agent.context_compressor.last_prompt_tokens}"
+    )
+
+
+def test_preflight_revises_upward_when_estimate_under_context_length():
+    """The seed-to-display intent (PR #413): preflight IS allowed to revise
+    ``last_prompt_tokens`` upward when the rough estimate is below the
+    context ceiling. This keeps the statusbar in sync when compression
+    no-ops but the loaded history is genuinely oversized."""
+    agent = _FakeAgent()
+    agent.compression_enabled = True
+    agent.context_compressor = _FakeCompressor(
+        last_prompt_tokens=50_000, context_length=200_000
+    )
+    agent.tools = [{"type": "function", "function": {"name": "huge"}}] * 80
+    agent._cached_system_prompt = "X" * 200_000
+
+    history = [
+        {"role": "user", "content": "x"},
+        {"role": "assistant", "content": "y"},
+        {"role": "user", "content": "x"},
+        {"role": "assistant", "content": "y"},
+        {"role": "user", "content": "x"},
+        {"role": "assistant", "content": "y"},
+    ]
+
+    # 144_669 is above the stale 50_000 but below the 200_000 ceiling —
+    # the legitimate preflight revision path that PR #413 introduced.
+    with patch(
+        "agent.turn_context.estimate_request_tokens_rough",
+        return_value=144_669,
+    ):
+        _build_with_compressor(agent, history)
+
+    assert agent.context_compressor.last_prompt_tokens == 144_669, (
+        f"preflight must revise upward when estimate is under ceiling; "
+        f"expected 144_669, got {agent.context_compressor.last_prompt_tokens}"
+    )
+
+
+def test_preflight_does_not_revise_downward():
+    """A smaller estimate must not clobber a larger tracked value
+    (``test_preflight_seed_only_revises_upward`` from PR #413)."""
+    agent = _FakeAgent()
+    agent.compression_enabled = True
+    agent.context_compressor = _FakeCompressor(
+        last_prompt_tokens=160_000, context_length=200_000
+    )
+    agent.tools = [{"type": "function", "function": {"name": "huge"}}] * 80
+    agent._cached_system_prompt = "X" * 200_000
+
+    history = [
+        {"role": "user", "content": "x"},
+        {"role": "assistant", "content": "y"},
+        {"role": "user", "content": "x"},
+        {"role": "assistant", "content": "y"},
+        {"role": "user", "content": "x"},
+        {"role": "assistant", "content": "y"},
+    ]
+
+    with patch(
+        "agent.turn_context.estimate_request_tokens_rough",
+        return_value=144_669,
+    ):
+        _build_with_compressor(agent, history)
+
+    assert agent.context_compressor.last_prompt_tokens == 160_000, (
+        f"preflight must not revise downward; "
+        f"expected 160_000 (stale larger value), got {agent.context_compressor.last_prompt_tokens}"
+    )
+
+
+def test_preflight_still_calls_should_compress_with_rough_estimate():
+    """Sanity: the fix only clamps the over-write; the rough estimate MUST
+    still drive the compression decision (the legitimate purpose of
+    preflight)."""
+    agent = _FakeAgent()
+    agent.compression_enabled = True
+
+    compressor = _FakeCompressor(
+        last_prompt_tokens=50_000, context_length=1_000_000
+    )
+    original_should_compress = compressor.should_compress
+
+    def tracking_should_compress(tokens):
+        compressor.should_compress_calls.append(tokens)
+        return False  # don't actually compress in this test
+
+    compressor.should_compress = tracking_should_compress
+    agent.context_compressor = compressor
+    agent.tools = [{"type": "function", "function": {"name": "huge"}}] * 80
+    agent._cached_system_prompt = "X" * 200_000
+
+    history = [
+        {"role": "user", "content": "x"},
+        {"role": "assistant", "content": "y"},
+        {"role": "user", "content": "x"},
+        {"role": "assistant", "content": "y"},
+        {"role": "user", "content": "x"},
+        {"role": "assistant", "content": "y"},
+    ]
+
+    with patch(
+        "agent.turn_context.estimate_request_tokens_rough",
+        return_value=3_100_000,
+    ):
+        _build_with_compressor(agent, history)
+
+    assert compressor.should_compress_calls, "preflight must still call should_compress with the rough estimate"
+    assert compressor.should_compress_calls[0] == 3_100_000
+    # And last_prompt_tokens is clamped to context_length, not 3.1M.
+    assert compressor.last_prompt_tokens == 1_000_000
+
 

@@ -407,6 +407,10 @@ export function useSessionActions({
       setMessages([])
       setCurrentUsage({
         calls: 0,
+        context_max: undefined,
+        context_percent: undefined,
+        context_used: undefined,
+        cost_usd: undefined,
         input: 0,
         output: 0,
         total: 0
