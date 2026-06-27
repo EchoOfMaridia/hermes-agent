@@ -377,6 +377,28 @@ def parse_contract(text: str) -> Tuple[str, GoalContract]:
     # If a headline was given but no explicit `outcome:` field, the headline
     # IS the outcome — don't duplicate it into the contract block (the goal
     # text already carries it), so leave outcome empty in that case.
+    # But when EVERY line was a recognized field and the user supplied no
+    # headline, the caller would otherwise re-feed the original text into
+    # ``mgr.set()`` (which puts ``verify: ...`` lines back into the goal
+    # text). Synthesize a sensible headline from the contract instead so
+    # ``mgr.set`` always receives a non-empty, human-readable goal and the
+    # contract fields stay in the contract block. Prefer the outcome (the
+    # user explicitly stated what "done" is); fall back to the verification
+    # (the test of done); then to a short joined summary of the remaining
+    # fields. Goal text stays bounded at 240 chars.
+    if not headline and not contract.is_empty():
+        if contract.outcome:
+            headline = contract.outcome
+        elif contract.verification:
+            headline = f"Achieve: {contract.verification}"
+        else:
+            fragments = [
+                str(getattr(contract, f)).strip()
+                for f in _CONTRACT_FIELDS
+                if getattr(contract, f).strip()
+            ]
+            joined = " | ".join(fragments)
+            headline = (joined[:237] + "…") if len(joined) > 240 else joined
     return headline, contract
 
 
