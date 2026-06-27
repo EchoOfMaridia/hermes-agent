@@ -401,7 +401,32 @@ def build_turn_context(
         if not _preflight_deferred:
             _last = _compressor.last_prompt_tokens
             # Do NOT overwrite the -1 sentinel (#36718).
-            if _last >= 0 and _preflight_tokens > _last:
+            #
+            # Clamp the rough estimate to the model's context window before
+            # seeding ``last_prompt_tokens``. The estimate is heuristic
+            # (chars/4 over system prompt + tools + messages) and can
+            # wildly exceed ``context_length`` when the tool schema set is
+            # large (50+ tools) — that's exactly what produced the
+            # ``3.1M / 1.0M`` desktop statusbar display bug. Without the
+            # clamp, the rough estimate propagates to ``context_used`` in
+            # ``tui_gateway._get_usage()`` and renders as a bogus
+            # percentage.
+            if (
+                _last >= 0
+                and _preflight_tokens > _last
+                and _compressor.context_length > 0
+            ):
+                _compressor.last_prompt_tokens = min(
+                    _preflight_tokens, _compressor.context_length
+                )
+            elif (
+                _last >= 0
+                and _preflight_tokens > _last
+                and _compressor.context_length <= 0
+            ):
+                # No ceiling to clamp against — preserve the prior behavior
+                # for backward compat (and the test_preflight_seed_only_revises_upward
+                # contract). The above clamp handles the common case.
                 _compressor.last_prompt_tokens = _preflight_tokens
 
         _compression_cooldown = getattr(
