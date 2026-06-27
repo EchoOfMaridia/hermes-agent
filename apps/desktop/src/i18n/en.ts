@@ -2450,6 +2450,7 @@ export const en: Translations = {
     providerCredentialRequired: 'Add a provider credential before sending your first message.',
     emptySlashCommand: 'empty slash command',
     slashNoActiveAgent: 'Send any message first, then try this command again.',
+    slashRoutedAsExec: 'This command is handled by the desktop — restart the app to refresh the renderer.',
     compressRunning: 'Compressing conversation…',
     // /reasoning — mirrors ui-tui/.../slash/commands/session.ts:407 (cli.py:_show_reasoning / _set_reasoning).
     reasoningStatus: (value, display) => `reasoning: ${value} · display ${display}`,

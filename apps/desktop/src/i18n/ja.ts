@@ -2408,6 +2408,8 @@ export const ja = defineLocale({
     // TODO(translate): replace English fallback with proper Japanese copy.
     slashNoActiveAgent: 'Send any message first, then try this command again.',
     // TODO(translate): replace English fallback with proper Japanese copy.
+    slashRoutedAsExec: 'This command is handled by the desktop — restart the app to refresh the renderer.',
+    // TODO(translate): replace English fallback with proper Japanese copy.
     compressRunning: 'Compressing conversation…',
     // TODO(translate): replace English fallback with proper Japanese copy.
     reasoningStatus: (value, display) => `reasoning: ${value} · display ${display}`,
