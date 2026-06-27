@@ -1897,7 +1897,12 @@ class GatewaySlashCommandsMixin:
             from hermes_cli.goals import parse_contract
 
             headline, parsed = parse_contract(args)
-            args = headline or args
+            # parse_contract always returns a non-empty headline when there
+            # is any non-whitespace input — it synthesizes one from the
+            # contract fields when every line was a recognized alias.
+            # Don't fall back to ``args`` here: that re-injects stripped
+            # field lines (e.g. ``verify: ...``) into the goal text.
+            args = headline
             contract = parsed if not parsed.is_empty() else None
 
         # Otherwise — treat the remaining text as the new goal.

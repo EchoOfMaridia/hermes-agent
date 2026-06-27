@@ -1916,7 +1916,12 @@ class CLICommandsMixin:
         from hermes_cli.goals import parse_contract
 
         headline, contract = parse_contract(arg)
-        goal_text = headline or arg
+        # parse_contract always returns a non-empty headline when there is
+        # any non-whitespace input — it synthesizes one from the contract
+        # fields when every line was a recognized alias. Don't fall back
+        # to ``arg`` here: that re-injects stripped field lines (e.g.
+        # ``verify: ...``) into the goal text.
+        goal_text = headline
         try:
             state = mgr.set(goal_text, contract=contract if not contract.is_empty() else None)
         except ValueError as exc:

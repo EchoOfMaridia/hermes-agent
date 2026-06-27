@@ -1274,6 +1274,65 @@ class TestParseContract:
         _, c = parse_contract("G\nconstraints: a\nconstraints: b")
         assert c.constraints == "a b"
 
+    def test_only_contract_fields_synthesizes_headline(self):
+        """Regression: when every input line was a recognized alias
+        (no headline), parse_contract must still return a non-empty
+        headline. Previously it returned "" and callers like
+        ``args = headline or args`` re-injected the contract field
+        lines into the goal text — so ``/goal verify: tests pass``
+        produced a goal whose text was literally ``"verify: tests pass"``
+        AND a contract carrying the same field. The goal loop then
+        told the agent to work toward ``"verify: tests pass"`` instead
+        of the user's intent. Now we synthesize a readable headline
+        from the contract fields.
+        """
+        from hermes_cli.goals import parse_contract
+
+        # Verification only — the headline is the "what done means" test.
+        h, c = parse_contract("verify: tests pass")
+        assert h == "Achieve: tests pass"
+        assert c.verification == "tests pass"
+        assert c.outcome == ""
+
+    def test_only_outcome_field_synthesizes_headline(self):
+        from hermes_cli.goals import parse_contract
+
+        # Outcome is the canonical "done" — it IS the headline.
+        h, c = parse_contract("outcome: fix the resume race")
+        assert h == "fix the resume race"
+        assert c.outcome == "fix the resume race"
+
+    def test_multi_field_only_uses_verification_synthesis(self):
+        from hermes_cli.goals import parse_contract
+
+        # Multiple contract fields, no headline — outcome is empty so
+        # the synthesizer falls through to "Achieve: <verification>".
+        h, c = parse_contract(
+            "verify: tests pass\n"
+            "constraints: keep the /login response shape\n"
+            "boundaries: only touch services/auth and its tests"
+        )
+        assert h == "Achieve: tests pass"
+        assert c.verification == "tests pass"
+        assert c.constraints == "keep the /login response shape"
+        assert c.boundaries == "only touch services/auth and its tests"
+
+    def test_only_constraints_synthesizes_joined_summary(self):
+        from hermes_cli.goals import parse_contract
+
+        # No outcome, no verification — fall through to the joined summary.
+        h, c = parse_contract(
+            "constraints: keep the public API stable\n"
+            "boundaries: only touch the foo module"
+        )
+        # Joined summary should mention both fields. Don't pin the exact
+        # wording too tightly — only the intent (sensible, non-empty,
+        # references the inputs).
+        assert h
+        assert "public API" in h or "foo module" in h
+        assert c.constraints == "keep the public API stable"
+        assert c.boundaries == "only touch the foo module"
+
 
 class TestGoalContractSerialization:
     def test_roundtrip_with_contract(self):
