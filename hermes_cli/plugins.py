@@ -339,9 +339,11 @@ class LoadedPlugin:
 class PluginContext:
     """Facade given to plugins so they can register tools and hooks."""
 
-    def __init__(self, manifest: PluginManifest, manager: "PluginManager"):
+    def __init__(self, manifest: PluginManifest, manager: "PluginManager",
+                 *, session_id: str = ""):
         self.manifest = manifest
         self._manager = manager
+        self._session_id = session_id
         # Lazy-built host-owned LLM facade — see ctx.llm property below.
         self._llm: Any = None
 
@@ -385,6 +387,17 @@ class PluginContext:
             return get_active_profile_name()
         except Exception:
             return "default"
+
+    @property
+    def session_id(self) -> str:
+        """Return the active Hermes session id, or "" if not in a session.
+
+        Surfaced from ``gateway.session_context.get_current_session_id()``
+        at ``PluginManager._load_plugin`` time so plugins can scope state
+        per-conversation. Empty in CLI (no-session) or kanban-spawned
+        worker contexts where the session contextvar was never set.
+        """
+        return self._session_id
 
     # -- tool registration --------------------------------------------------
 
