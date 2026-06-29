@@ -1,0 +1,59 @@
+"""hermes_workflow plugin.
+
+Re-exports the DSL surface so workflow scripts can do::
+
+    from plugins.hermes_workflow import step, parallel, gather, workflow, ...
+
+The register() function below is the plugin entrypoint called by
+hermes's plugin loader at startup.
+"""
+
+from plugins.hermes_workflow.dsl import (
+    # Types
+    Evidence,
+    RunContext,
+    RunState,
+    StepSpec,
+    StepState,
+    Verifier,
+    VerifierResult,
+    # Errors
+    WorkflowError,
+    WorkflowValidationError,
+    CapExceeded,
+    MaxConcurrentReached,
+    MaxTotalReached,
+    VerifierMismatch,
+    # Primitives
+    step,
+    parallel,
+    gather,
+    workflow,
+)
+
+__all__ = [
+    "Evidence",
+    "RunContext",
+    "RunState",
+    "StepSpec",
+    "StepState",
+    "Verifier",
+    "VerifierResult",
+    "WorkflowError",
+    "WorkflowValidationError",
+    "CapExceeded",
+    "MaxConcurrentReached",
+    "MaxTotalReached",
+    "VerifierMismatch",
+    "step",
+    "parallel",
+    "gather",
+    "workflow",
+    "register",
+]
+
+
+# Plugin entrypoint. Imported lazily by hermes's plugin loader.
+def register(ctx):
+    from plugins.hermes_workflow.plugin_entrypoint import register as _register
+    return _register(ctx)

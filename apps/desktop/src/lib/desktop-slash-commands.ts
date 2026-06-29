@@ -35,8 +35,10 @@ export type DesktopActionId =
   | 'compress'
   | 'fast'
   | 'handoff'
+  | 'hatch'
   | 'help'
   | 'new'
+  | 'pet'
   | 'profile'
   | 'reasoning'
   | 'skin'
@@ -49,7 +51,7 @@ export type DesktopActionId =
 export type DesktopPickerId = 'model' | 'session'
 
 /** Why a known Hermes command has no desktop UI surface. */
-export type DesktopUnavailableReason = 'advanced' | 'messaging' | 'terminal'
+export type DesktopUnavailableReason = 'advanced' | 'messaging' | 'settings' | 'terminal'
 
 /**
  * How the desktop fulfils a command. This is the single discriminator the
@@ -103,9 +105,19 @@ const unavailable = (reason: DesktopUnavailableReason): DesktopCommandSurface =>
 const DESKTOP_COMMAND_SPECS: readonly DesktopCommandSpec[] = [
   // Local client actions
   { name: '/new', description: 'Start a new desktop chat', aliases: ['/reset'], surface: action('new') },
-  { name: '/branch', description: 'Branch the latest message into a new chat', aliases: ['/fork'], surface: action('branch') },
+  {
+    name: '/branch',
+    description: 'Branch the latest message into a new chat',
+    aliases: ['/fork'],
+    surface: action('branch')
+  },
   { name: '/yolo', description: 'Toggle YOLO — auto-approve dangerous commands', surface: action('yolo') },
-  { name: '/handoff', description: 'Hand off this session to a messaging platform', surface: action('handoff'), args: true },
+  {
+    name: '/handoff',
+    description: 'Hand off this session to a messaging platform',
+    surface: action('handoff'),
+    args: true
+  },
   { name: '/profile', description: 'Switch the active Hermes profile', surface: action('profile') },
   { name: '/skin', description: 'Switch desktop theme or cycle to the next one', surface: action('skin'), args: true },
   { name: '/title', description: 'Rename the current session', surface: action('title') },
@@ -167,7 +179,12 @@ const DESKTOP_COMMAND_SPECS: readonly DesktopCommandSpec[] = [
   },
 
   // Backend-executed commands that render useful inline output
-  { name: '/agents', description: 'Show active desktop sessions and running tasks', aliases: ['/tasks'], surface: exec() },
+  {
+    name: '/agents',
+    description: 'Show active desktop sessions and running tasks',
+    aliases: ['/tasks'],
+    surface: exec()
+  },
   { name: '/background', description: 'Run a prompt in the background', aliases: ['/bg', '/btw'], surface: exec() },
   { name: '/compress', description: 'Compress this conversation context', surface: action('compress'), args: true },
   { name: '/debug', description: 'Create a debug report', surface: exec() },
@@ -178,6 +195,18 @@ const DESKTOP_COMMAND_SPECS: readonly DesktopCommandSpec[] = [
   { name: '/personality', description: 'Switch personality for this session', surface: exec(), args: true },
   { name: '/platforms', description: 'Browse connected messaging platforms', surface: exec() },
   { name: '/plugins', description: 'Browse loaded plugins', surface: exec() },
+  {
+    name: '/pet',
+    description: 'Toggle or adopt a petdex mascot (/pet, /pet list, /pet boba)',
+    surface: action('pet'),
+    args: true
+  },
+  {
+    name: '/hatch',
+    description: 'Generate a new pet (opens the pet generator)',
+    aliases: ['/generate-pet'],
+    surface: action('hatch')
+  },
   { name: '/queue', description: 'Queue a prompt for the next turn', aliases: ['/q'], surface: exec() },
   { name: '/reload', description: 'Re-read ~/.hermes/.env into the running gateway', surface: exec() },
   // /reload-mcp and /reload-skills are simple `slash.exec` round-trips —
@@ -213,12 +242,41 @@ const DESKTOP_COMMAND_SPECS: readonly DesktopCommandSpec[] = [
 // attempt to render their TUI output in the chat panel would be a lie.
 const NO_DESKTOP_SURFACE: Record<DesktopUnavailableReason, readonly string[]> = {
   terminal: [
-    '/clear', '/compact', '/copy', '/details',
-    '/exit', '/footer', '/gateway', '/indicator', '/mouse', '/paste', '/quit', '/redraw', '/restart',
-    '/sb', '/set-home', '/sethome', '/snap', '/snapshot', '/statusbar', '/toolsets', '/update'
+    '/busy',
+    '/clear',
+    '/compact',
+    '/config',
+    '/copy',
+    '/cron',
+    '/details',
+    '/exit',
+    '/footer',
+    '/gateway',
+    '/history',
+    '/image',
+    '/indicator',
+    '/logs',
+    '/mouse',
+    '/paste',
+    '/platforms',
+    '/plugins',
+    '/quit',
+    '/redraw',
+    '/reload',
+    '/restart',
+    '/sb',
+    '/set-home',
+    '/sethome',
+    '/snap',
+    '/snapshot',
+    '/statusbar',
+    '/toolsets',
+    '/update',
+    '/verbose'
   ],
   messaging: ['/approve', '/deny'],
-  advanced: ['/curator', '/insights', '/kanban']
+  settings: ['/skills', '/pets'],
+  advanced: ['/curator', '/fast', '/insights', '/kanban', '/reasoning', '/voice']
 }
 
 const ALL_SPECS: readonly DesktopCommandSpec[] = [
@@ -238,6 +296,7 @@ const UNAVAILABLE_MESSAGE: Record<DesktopUnavailableReason, (command: string) =>
   advanced: command =>
     `${command} is not shown in the desktop slash palette. Use the relevant desktop control or terminal interface instead.`,
   messaging: command => `${command} is only used from messaging platforms.`,
+  settings: command => `${command} is configured via desktop settings instead of a slash command.`,
   terminal: command => `${command} is only available in the terminal interface.`
 }
 
