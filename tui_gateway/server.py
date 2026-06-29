@@ -11868,6 +11868,35 @@ def _(rid, params: dict) -> dict:
         except Exception as e:
             warning = f"skill discovery unavailable: {e}"
 
+        # Plugin-registered slash commands. Without this loop the catalog
+        # the desktop/TUI surfaces for the bare '/' popover only lists
+        # built-in COMMAND_REGISTRY entries — plugin commands (e.g.
+        # /workflow from hermes_workflow, /lcm from other plugins) are
+        # invisible until the user types their full name. The user CAN
+        # still submit them (gateway/run.py:9010 dispatches via
+        # get_plugin_command_handler), but they don't appear in the
+        # popover. complete.slash picks them up via
+        # SlashCommandCompleter.get_completions (hermes_cli/commands.py:1959)
+        # so arg completion works once the user starts typing the prefix.
+        plugin_count = 0
+        try:
+            from hermes_cli.plugins import get_plugin_commands
+            plugin_bucket = "Plugins"
+            if plugin_bucket not in cat_map:
+                cat_map[plugin_bucket] = []
+                cat_order.append(plugin_bucket)
+            for cmd_name, cmd_info in sorted(get_plugin_commands().items()):
+                pkey = f"/{cmd_name}"
+                canon[pkey.lower()] = pkey
+                desc = str(cmd_info.get("description", "Plugin command"))
+                desc_short = desc[:120] + ("…" if len(desc) > 120 else "")
+                all_pairs.append([pkey, desc_short])
+                cat_map[plugin_bucket].append([pkey, desc_short])
+                plugin_count += 1
+        except Exception as e:
+            if not warning:
+                warning = f"plugin command discovery unavailable: {e}"
+
         for cat in cat_order:
             categories.append({"name": cat, "pairs": cat_map[cat]})
 

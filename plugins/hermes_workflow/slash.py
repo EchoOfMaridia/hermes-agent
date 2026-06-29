@@ -45,8 +45,10 @@ from typing import Any
 _WORKFLOW_COMMAND = "workflow"
 
 
-def build_slash_handlers(runtime: Any,
-                          script_author: Any | None = None) -> dict[str, dict]:
+def build_slash_handlers(
+    runtime: Any,
+    script_author: Any | None = None,
+) -> dict[str, dict]:
     """Build the dict of slash-command name -> {handler, description}.
 
     The plugin registers a single command (``workflow``) whose handler
@@ -54,25 +56,22 @@ def build_slash_handlers(runtime: Any,
     the matching implementation. This matches the host's slash-command
     model (``name`` is one token, ``arg`` is the rest).
 
-    Args:
-        runtime:        The WorkflowRuntime singleton (already constructed
-                        by register()).
-        script_author:  Optional ScriptAuthor instance. When provided,
-                        the ``create`` subcommand is wired to the LLM-
-                        driven ad-hoc authoring path; when None, ``create``
-                        falls back to the v0.2.0 manual-copy guidance.
-                        Mirrors the gateway_handler's contract.
+    ``script_author`` is threaded through from the plugin entrypoint so
+    ``/workflow create <intent>`` can route to the LLM-driven ad-hoc
+    authoring path (mirrors the gateway handler's contract in
+    gateway_handler.py). Without it the ``create`` subcommand falls back
+    to v0.2.0 manual-copy guidance (the same code path the CLI uses
+    when no LLM is available).
     """
-
     def _workflow_handler(raw: str) -> str | None:
-        return _dispatch_workflow(runtime, raw, script_author)
+        return _dispatch_workflow(runtime, raw, script_author=script_author)
 
     return {
         _WORKFLOW_COMMAND: {
             "handler": _workflow_handler,
             "description": (
-                "Workflow plugin. Subcommands: create, run, list, "
-                "inspect, status, snapshot, cancel, save, expand, help."
+                "Workflow plugin. Subcommands: run, list, inspect, "
+                "status, snapshot, cancel, save, expand, create, help."
             ),
             "args_hint": "<subcommand> [args...]",
         },
@@ -98,7 +97,6 @@ _CLI_FORWARD = {
 
 _HELP_TEXT = """\
 workflow plugin commands:
-  /workflow create <intent>                   Generate a workflow script from a natural-language intent (LLM)
   /workflow run <script> [--inputs k=v ...]   Run a workflow script by path
   /workflow list                              List saved workflows in the library
   /workflow inspect <name-or-script>          Show a script's step graph
@@ -107,13 +105,25 @@ workflow plugin commands:
   /workflow cancel <run_id>                   Cancel a running workflow
   /workflow save <name>                       Save the most-recent run to the library (v0.2.0 stub)
   /workflow expand <run_id>                   Expand a run's card tree to tier 1 (full detail)
+  /workflow create <intent>                   Ad-hoc workflow from natural-language intent (LLM-driven, v0.2.0)
   /workflow help                              Show this help
 """
 
 
-def _dispatch_workflow(runtime: Any, raw: str,
-                       script_author: Any | None = None) -> str | None:
-    """Route a /workflow invocation to the right subcommand."""
+def _dispatch_workflow(
+    runtime: Any,
+    raw: str,
+    script_author: Any | None = None,
+) -> str | None:
+    """Route a /workflow invocation to the right subcommand.
+
+    ``script_author`` is plumbed in for the v0.2.0 ``create`` subcommand:
+    if the user supplied a natural-language intent after ``/workflow create ...``
+    we route to ``script_author`` (LLM-driven ad-hoc authoring) so the
+    agent doesn't have to manually write Python. Falls back to the
+    v0.2.0 save stub path (manual copy-paste) when ``script_author`` is
+    ``None`` — the same behavior the CLI has when no LLM is available.
+    """
     tokens = shlex.split(raw) if raw and raw.strip() else []
     if not tokens or tokens[0] in {"help", "--help", "-h", "?"}:
         return _HELP_TEXT.rstrip()
@@ -130,9 +140,9 @@ def _dispatch_workflow(runtime: Any, raw: str,
         tier_args = list(rest) + ["--tier", "1"]
         return _run_cli_capture("snapshot", " ".join(_quote(a) for a in tier_args))
     if sub == "create":
-        # Ad-hoc authoring: ScriptAuthor.generate from natural language.
-        # Bridges sync slash -> async LLM via asyncio.run, matching the
-        # pattern used by _cancel_via_runtime and _run_cli_capture.
+        # v0.2.0 LLM ad-hoc authoring. Routes to ScriptAuthor.generate
+        # when one is wired in (CLI without LLM, or stub context, falls
+        # back to the manual-copy guidance via the helper).
         return _create_via_script_author(runtime, rest, script_author)
 
     # Forward to CLI subcommand ----------------------------------------
@@ -202,8 +212,11 @@ def _cancel_via_runtime(runtime: Any, rest: list[str]) -> str | None:
     return f"cancelled {run_id}"
 
 
-def _create_via_script_author(runtime: Any, rest: list[str],
-                                script_author: Any | None) -> str | None:
+def _create_via_script_author(
+    runtime: Any,
+    rest: list[str],
+    script_author: Any | None,
+) -> str | None:
     """Ad-hoc authoring via ScriptAuthor.
 
     Mirrors the contract of ``gateway_handler._handle_ad_hoc``: when
@@ -259,7 +272,11 @@ def _create_via_script_author(runtime: Any, rest: list[str],
     # Failure: surface error_stage + a raw_script preview so the user
     # can see what the LLM generated before the gate rejected it.
     preview = (result.raw_script[:300] if result.raw_script else "")
-    suffix = f"\n\n--- generated script (first 300 chars) ---\n{preview}" if preview else ""
+    suffix = (
+        f"\n\n--- generated script (first 300 chars) ---\n{preview}"
+        if preview
+        else ""
+    )
     return (
         f"ScriptAuthor failed at stage={result.error_stage!r}: "
         f"{result.error}{suffix}"

@@ -386,7 +386,13 @@ def _cmd_snapshot(args: argparse.Namespace) -> int:
 
 
 def _cmd_list(args: argparse.Namespace) -> int:
-    """List library entries. v0.1.0: read library.json if present."""
+    """List library entries. v0.1.0: read library.json if present.
+
+    The library file is ``{"version": N, "entries": [{name, ...}, ...]}``
+    — iterate ``entries``, not the top-level dict, or each ``entry``
+    ends up a string key (e.g. ``"version"``) and ``entry.get('name')``
+    crashes with ``AttributeError: 'str' object has no attribute 'get'``.
+    """
     library_path = args_journal_root() / "library.json"
     if not library_path.exists():
         if args.as_json:
@@ -396,11 +402,18 @@ def _cmd_list(args: argparse.Namespace) -> int:
                   "directly via `hermes workflow run <script>.py`)")
         return 0
     data = json.loads(library_path.read_text())
+    entries = data.get("entries", []) if isinstance(data, dict) else data
     if args.as_json:
-        print(json.dumps(data, indent=2))
+        print(json.dumps(entries, indent=2))
     else:
-        for entry in data:
-            print(f"  {entry.get('name')}: {entry.get('description', '')}")
+        if not entries:
+            print("(library is empty)")
+            return 0
+        for entry in entries:
+            if isinstance(entry, dict):
+                print(f"  {entry.get('name')}: {entry.get('description', '')}")
+            else:
+                print(f"  {entry}")
     return 0
 
 
