@@ -109,13 +109,30 @@ def register_cli(subparsers: Any) -> None:
     cancel_p.add_argument("run_id")
     cancel_p.add_argument("--reason", default="user_cancelled")
 
-    # create / save: placeholders for v0.2.0
-    for name, msg in [
-        ("create", "create is a v0.2.0 feature (requires hermes-agent integration)."),
-        ("save", "save is a v0.2.0 feature."),
-    ]:
-        sp = sub.add_parser(name, help=msg)
-        sp.add_argument("args", nargs=argparse.REMAINDER)
+    # create / save: placeholders. The real wiring is in the slash
+    # surface (slash.py:_create_via_script_author) because the CLI
+    # process has no LLM handle. The CLI keeps these as informative
+    # failures so users running `hermes workflow create <intent>` get
+    # pointed at the slash equivalent instead of an opaque v0.2.0
+    # stub error.
+    create_p = sub.add_parser(
+        "create",
+        help=(
+            "Generate a workflow script from a natural-language "
+            "intent (slash only — use /workflow create <intent>)."
+        ),
+    )
+    create_p.add_argument("intent", nargs=argparse.REMAINDER)
+
+    save_p = sub.add_parser(
+        "save",
+        help=(
+            "Save the most-recent run to the library (v0.2.0 stub — "
+            "copy your .py script into ~/.hermes/workflows/<name>.py "
+            "and use `hermes workflow run <path>`)."
+        ),
+    )
+    save_p.add_argument("name")
 
 
 async def _dispatch_async(args: argparse.Namespace) -> int:
@@ -136,10 +153,30 @@ async def _dispatch_async(args: argparse.Namespace) -> int:
         return _cmd_list(args)
     if cmd == "inspect":
         return _cmd_inspect(args)
-    if cmd in ("create", "save"):
-        print(f"error: {args.workflow_command}: "
-              f"this command is not yet implemented (v0.2.0).",
-              file=sys.stderr)
+    if cmd == "create":
+        # The CLI process has no LLM handle. The slash surface
+        # (`/workflow create <intent>`) is the only place ScriptAuthor
+        # is wired in -- see slash.py:_create_via_script_author.
+        print(
+            "error: `hermes workflow create` requires an LLM handle.\n"
+            "Use the slash equivalent in your chat session:\n"
+            "  /workflow create <intent>\n"
+            "or save a hand-authored script directly:\n"
+            "  ~/.hermes/workflows/<name>.py  -- then  "
+            "`hermes workflow run <path>`",
+            file=sys.stderr,
+        )
+        return 2
+    if cmd == "save":
+        # Library-save is gated on the script-author integration
+        # being runnable from a CLI subprocess (it is not yet).
+        print(
+            "error: `hermes workflow save` is a v0.2.0 feature.\n"
+            "Workaround: copy your .py script into "
+            "~/.hermes/workflows/<name>.py and run "
+            "`hermes workflow run <path>`.",
+            file=sys.stderr,
+        )
         return 2
     print(f"error: unknown workflow command: {cmd}", file=sys.stderr)
     return 2
