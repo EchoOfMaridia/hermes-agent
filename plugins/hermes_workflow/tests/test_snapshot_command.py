@@ -44,8 +44,13 @@ def _make_args(*cli_args: str) -> argparse.Namespace:
     from plugins.hermes_workflow.cli import register_cli
 
     parser = argparse.ArgumentParser()
-    sub = parser.add_subparsers()
-    register_cli(sub)
+    # Mimic the hermes plugin loader wiring: register_cli receives a
+    # leaf ``ArgumentParser`` (the ``workflow`` subparser) and attaches
+    # the run/list/... sub-subparsers to it.  See cli.py:register_cli
+    # for the contract.
+    top_subs = parser.add_subparsers()
+    workflow_parser = top_subs.add_parser("workflow")
+    register_cli(workflow_parser)
     return parser.parse_args(["workflow", *cli_args])
 
 
@@ -58,8 +63,10 @@ class TestSnapshotArgs:
         from plugins.hermes_workflow.cli import register_cli
         import argparse
         parser = argparse.ArgumentParser()
-        sub = parser.add_subparsers()
-        register_cli(sub)
+        # Same contract as _make_args: leaf ``workflow`` parser in.
+        top_subs = parser.add_subparsers()
+        workflow_parser = top_subs.add_parser("workflow")
+        register_cli(workflow_parser)
 
     def test_snapshot_tier_default_is_2(self, tmp_path, monkeypatch):
         monkeypatch.setenv("HOME", str(tmp_path))

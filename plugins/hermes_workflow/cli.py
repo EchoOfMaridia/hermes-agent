@@ -39,15 +39,30 @@ from .runtime import WorkflowRuntime
 from .dsl.validator import collect_step_specs, GraphValidator
 
 
-def register_cli(subparsers: Any) -> None:
-    """Register the workflow CLI subcommand with hermes."""
-    p = subparsers.add_parser(
-        "workflow",
-        help="Run, inspect, and manage workflow scripts.",
-        description="hermes_workflow: script-driven agent orchestration.",
-    )
-    p.set_defaults(func=_dispatch)
-    sub = p.add_subparsers(dest="workflow_command")
+def register_cli(subparser: Any) -> None:
+    """Register the workflow CLI subcommand tree under ``hermes workflow``.
+
+    Hermes's plugin loader calls us with a pre-built
+    ``argparse.ArgumentParser`` whose name is already ``workflow``
+    (created at ``hermes_cli/main.py:12811`` via
+    ``subparsers.add_parser(cmd_info['name'], ...)``).  Our job is to
+    attach the sub-subparsers (``run``, ``list``, ``inspect``, ...).
+    This matches the contract used by ``google_meet/cli.py``,
+    ``teams_pipeline/cli.py``, and ``memory/honcho/cli.py`` — they all
+    receive the leaf ``ArgumentParser`` and call ``add_subparsers`` /
+    ``add_argument`` on it.
+
+    Contract note: an earlier version of this function did
+    ``subparsers.add_parser('workflow', ...)`` itself, which only
+    works when ``subparsers`` is a ``_SubParsersAction``.  The actual
+    value passed in is a leaf ``ArgumentParser`` (per the main.py
+    calling code), so the call raised
+    ``AttributeError: 'ArgumentParser' object has no attribute 'add_parser'``
+    and the whole plugin CLI discovery block was swallowed by the
+    ``except`` guard, leaving ``workflow`` in --help but rejecting
+    every subcommand.  This version accepts the leaf parser.
+    """
+    sub = subparser.add_subparsers(dest="workflow_command")
 
     # run
     run_p = sub.add_parser("run", help="Run a workflow script.")

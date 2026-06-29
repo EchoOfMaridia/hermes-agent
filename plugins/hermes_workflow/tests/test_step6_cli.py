@@ -59,8 +59,12 @@ class TestArgParsing:
         from plugins.hermes_workflow.cli import register_cli
         import argparse
         parser = argparse.ArgumentParser()
-        sub = parser.add_subparsers()
-        register_cli(sub)
+        # Mimic the hermes plugin loader: create the leaf ``workflow``
+        # subparser and hand it to register_cli. register_cli then
+        # attaches ``run``/``list``/... sub-subparsers to that leaf.
+        top_subs = parser.add_subparsers()
+        workflow_parser = top_subs.add_parser("workflow")
+        register_cli(workflow_parser)
         # Sanity: no exception.
 
     def test_parse_inputs_simple(self):
@@ -276,8 +280,13 @@ def _make_args(*cli_args: str) -> argparse.Namespace:
     from plugins.hermes_workflow.cli import register_cli
 
     parser = argparse.ArgumentParser()
-    sub = parser.add_subparsers()
-    register_cli(sub)
+    # Mimic the hermes plugin loader wiring: register_cli receives a
+    # leaf ``ArgumentParser`` (the ``workflow`` subparser) and attaches
+    # the run/list/... sub-subparsers to it.  See cli.py:register_cli
+    # for the contract.
+    top_subs = parser.add_subparsers()
+    workflow_parser = top_subs.add_parser("workflow")
+    register_cli(workflow_parser)
 
     full = ["workflow", *cli_args]
     return parser.parse_args(full)
