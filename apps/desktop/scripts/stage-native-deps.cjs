@@ -35,6 +35,24 @@ const APP_ROOT = path.resolve(__dirname, '..')
 const REPO_ROOT = path.resolve(APP_ROOT, '..', '..')
 const STAGE_ROOT = path.join(APP_ROOT, 'build', 'native-deps')
 
+// Search paths for `require.resolve(name, { paths })`.  Walk the most likely
+// sites first: a hoisted install (npm workspaces dedup, or pnpm with
+// `nodeLinker=hoisted`) puts the dep straight into REPO_ROOT/node_modules,
+// while pnpm with the default `nodeLinker=isolated` leaves the dep in
+// <workspace>/node_modules/.pnpm/<pkg>@<v>/node_modules/<pkg>.  Both layouts
+// are exercised across the npm/pnpm/yarn-matrix this fork wants to support —
+// listing only REPO_ROOT misses the per-workspace pnpm store and crashes the
+// staging script with `Could not resolve 'simple-git'` even though pnpm has
+// installed it.  Symptom in the packaged app: launch-time `Cannot find
+// module 'simple-git'` from electron/git-review-ops.cjs, because staging
+// silently skipped the closure (issue #52735 in the upstream fork).
+const RESOLVE_SEARCH_PATHS = [
+  REPO_ROOT,
+  path.join(REPO_ROOT, 'node_modules'),
+  APP_ROOT,
+  path.join(APP_ROOT, 'node_modules')
+]
+
 // The target arch may be overridden by electron-builder via npm_config_arch
 // (e.g. `npm run dist -- --arm64`); fall back to the build host's arch.
 const TARGET_ARCH = process.env.npm_config_arch || process.arch
@@ -184,7 +202,7 @@ function stageOne(spec) {
 // work locally.  Instead resolve the package's main entry (exports-aware) and
 // walk up to the directory whose package.json's "name" matches.
 function resolvePkgDir(name, fromDir) {
-  const searchPaths = [fromDir, REPO_ROOT, path.join(REPO_ROOT, 'node_modules')]
+  const searchPaths = [fromDir, ...RESOLVE_SEARCH_PATHS]
   let entry
   try {
     entry = require.resolve(name, { paths: searchPaths })

@@ -126,13 +126,20 @@ def register(ctx) -> None:
         handler_fn=_cli_default_handler,
         description=(
             "hermes_workflow: script-driven agent orchestration. "
-            "Subcommands: run, list, inspect, status, replay, "
-            "snapshot, cancel."
+            "Subcommands: create (slash only), run, list, inspect, "
+            "status, replay, snapshot, cancel. The `create` subcommand "
+            "is only available via /workflow create <intent> because the "
+            "CLI process has no LLM handle; the slash surface threads "
+            "ScriptAuthor in via the plugin context."
         ),
     )
 
     # Surface 2: Slash commands (CLI + gateway in-session).
-    slash_handlers = build_slash_handlers(runtime)
+    # Thread script_author into the slash surface so /workflow create
+    # <intent> can route to the LLM-driven ad-hoc authoring path.
+    # Without script_author, the create subcommand falls back to v0.2.0
+    # manual-copy guidance (mirrors the gateway handler's contract).
+    slash_handlers = build_slash_handlers(runtime, script_author=script_author)
     for cmd_name, cmd_def in slash_handlers.items():
         try:
             ctx.register_command(
