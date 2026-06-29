@@ -13803,6 +13803,28 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         if adapter and hasattr(adapter, "get_pending_message"):
             adapter.get_pending_message(session_key)  # consume and discard
         self._pending_messages.pop(session_key, None)
+        # Force-cancel any pending clarifies so the agent thread unblocks
+        # immediately. Without this, /stop and /new can hang until the
+        # gateway's clarify-timeout fires (default 1h) because the agent
+        # thread is parked on `wait_for_response` in the gateway primitive.
+        # The 2026-06-29 Discord "stuck button" incident: with buttons
+        # grayed out and no resolve firing, the agent was stuck on the
+        # clarify gate. Stopping the agent did nothing because the gate
+        # was the blocker, not the agent loop. /stop now unblocks the gate.
+        try:
+            from tools.clarify_gateway import force_cancel_session
+            cancelled = force_cancel_session(session_key)
+            if cancelled:
+                logger.info(
+                    "Force-cancelled %d pending clarify(ies) for session %s "
+                    "(reason=%s)",
+                    cancelled, session_key, invalidation_reason,
+                )
+        except Exception as exc:
+            logger.debug(
+                "force_cancel_session failed for %s: %s",
+                session_key, exc,
+            )
         if release_running_state:
             self._release_running_agent_state(session_key)
 

@@ -7401,31 +7401,30 @@ def _define_discord_view_classes() -> None:
                     pass
 
             # Resolve via the gateway clarify primitive — same mechanism as
-            # Telegram. Look up the canonical choice text from the entry so
-            # we round-trip the original value, not a button-label variant.
-            resolved_text: Optional[str] = None
+            # Telegram. The new ``resolve_choice_by_index`` helper does the
+            # entry lookup + bounds check + resolve in one call, so we don't
+            # have to reach into the module's private ``_entries`` dict.
+            # If the entry was already cleared (timeout race, session
+            # boundary, force-cancel) the helper returns False — we
+            # surface that as a log line, but we don't fall back to the
+            # truncated button label as the answer (that was the bug:
+            # truncated label didn't match ``choices_offered``, clarify_tool
+            # tagged it ``"unresolved"``, the gate halted, and the agent
+            # was stuck because every button was grayed out).
             try:
-                from tools.clarify_gateway import _entries as _clarify_entries  # type: ignore
-                entry = _clarify_entries.get(self.clarify_id)
-                if entry and entry.choices and 0 <= index < len(entry.choices):
-                    resolved_text = entry.choices[index]
-            except Exception:
-                resolved_text = None
-            if resolved_text is None:
-                resolved_text = choice
-
-            try:
-                from tools.clarify_gateway import resolve_gateway_clarify
-                resolved = resolve_gateway_clarify(self.clarify_id, resolved_text)
+                from tools.clarify_gateway import resolve_choice_by_index
+                resolved = resolve_choice_by_index(self.clarify_id, index)
                 logger.info(
-                    "Discord clarify button resolved (id=%s, choice=%r, user=%s, ok=%s)",
-                    self.clarify_id, resolved_text,
+                    "Discord clarify button resolved (id=%s, index=%s, "
+                    "user=%s, ok=%s)",
+                    self.clarify_id, index,
                     getattr(getattr(interaction, "user", None), "display_name", "?"),
                     resolved,
                 )
             except Exception as exc:
                 logger.error(
-                    "Discord clarify resolve_gateway_clarify failed (id=%s): %s",
+                    "Discord clarify resolve_choice_by_index failed "
+                    "(id=%s): %s",
                     self.clarify_id, exc,
                 )
 
