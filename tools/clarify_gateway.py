@@ -162,6 +162,72 @@ def resolve_gateway_clarify(clarify_id: str, response: str) -> bool:
     return True
 
 
+def resolve_choice_by_index(clarify_id: str, index: int) -> bool:
+    """Resolve a pending multi-choice clarify by button index.
+
+    Public helper for platform adapters (Discord ``ClarifyChoiceView``,
+    Telegram ``InlineKeyboardButton`` callbacks, etc.) that render one
+    button per choice and need a clean way to resolve the choice WITHOUT
+    reaching into the module's private ``_entries`` dict.
+
+    Why this exists (the Discord "buttons grayed out, agent stuck" bug):
+    The Discord adapter historically did::
+
+        from tools.clarify_gateway import _entries
+        entry = _entries.get(self.clarify_id)
+        if entry and entry.choices and 0 <= index < len(entry.choices):
+            resolved_text = entry.choices[index]
+        ...
+        resolve_gateway_clarify(self.clarify_id, resolved_text)
+
+    That reach-in pattern has three failure modes:
+
+      1. The entry was already cleaned up by a session-boundary clear or a
+         late timeout. ``_entries.get`` returns ``None`` and the adapter
+         falls back to the truncated button label as the answer. The
+         agent receives a value that doesn't match ``choices_offered``,
+         ``clarify_tool`` tags it ``"unresolved"``, the gate halts, and
+         the agent is stuck because every button was already grayed out.
+      2. The resolve call fails (network error, callback exception). The
+         buttons are still grayed. The user can't re-click. Session
+         must be destroyed.
+      3. Private-state reach means any change to ``clarify_gateway``
+         internals silently breaks the adapter's resolve path. The bug
+         class never gets fixed in one place.
+
+    This helper centralises the entry lookup and resolve. If the entry is
+    gone (cleaned up by timeout or session-boundary cleanup) the call is
+    a clean no-op — the adapter's late click doesn't crash, doesn't fall
+    back to truncated text, doesn't brick the session.
+
+    Args:
+        clarify_id: The pending clarify entry's id (UUID hex, 10 chars).
+        index: Zero-based index into the entry's ``choices`` list.
+
+    Returns:
+        ``True`` if a resolve fired; ``False`` if the entry was not found,
+        already resolved, has no choices (open-ended clarify), or the
+        index is out of range.
+    """
+    with _lock:
+        entry = _entries.get(clarify_id)
+        if entry is None:
+            return False
+        # Already resolved — idempotent no-op so a late Discord click
+        # doesn't overwrite the user's first choice.
+        if entry.event.is_set():
+            return False
+        if entry.choices is None:
+            # Open-ended clarify — use the text-fallback path, not the
+            # button-by-index path. Returning False here forces the adapter
+            # to fall back to mark_awaiting_text + text-intercept.
+            return False
+        if not (0 <= index < len(entry.choices)):
+            return False
+        resolved_text = entry.choices[index]
+    return resolve_gateway_clarify(clarify_id, resolved_text)
+
+
 def get_pending_for_session(
     session_key: str,
     *,
@@ -239,7 +305,11 @@ def clear_session(session_key: str) -> int:
 
     Used by session-boundary cleanup (e.g. ``/new``, gateway shutdown,
     cached-agent eviction) so blocked agent threads don't hang past the
-    end of their session.  Returns the number of entries cancelled.
+    end of their session.  Returns the number of entries that were
+    *actually cancelled* (still pending when called). Entries that were
+    already resolved by a button click or text intercept are removed
+    silently and not counted — the user's choice is preserved and the
+    agent thread already unblocked.
     """
     with _lock:
         ids = list(_session_index.pop(session_key, []) or [])
@@ -247,6 +317,10 @@ def clear_session(session_key: str) -> int:
     cancelled = 0
     for entry in entries:
         if entry is None:
+            continue
+        if entry.event.is_set():
+            # Already resolved (button click, text intercept, prior cancel).
+            # Don't overwrite the user's response with an empty sentinel.
             continue
         # Empty string sentinel — agent code can distinguish from a real
         # response by inspecting the wait_for_response return value
@@ -256,6 +330,25 @@ def clear_session(session_key: str) -> int:
         entry.event.set()
         cancelled += 1
     return cancelled
+
+
+def force_cancel_session(session_key: str) -> int:
+    """Atomic panic-button cancel — alias-shaped surface for /stop and /new.
+
+    Functionally identical to ``clear_session``. Exists as a separate name
+    so call sites that want to signal "user explicitly hit cancel, drop
+    everything" read clearly at the call site, and so the bug-fix history
+    (the Discord "stuck button" incident of 2026-06-29) has a single
+    symbol to point at in postmortems.
+
+    Without this, the only way to escape a stuck clarify was to destroy
+    the entire session. Now ``/stop`` can fire ``force_cancel_session``
+    to unblock the agent thread and let the agent respond with a halt
+    (clarify_tool's ``user_response_mode == "unresolved"`` discipline
+    catches the sentinel and forces a halt, so the agent doesn't proceed
+    past the gate the user was trying to escape from).
+    """
+    return clear_session(session_key)
 
 
 # =========================================================================
