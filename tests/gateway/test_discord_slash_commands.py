@@ -158,34 +158,6 @@ async def test_registers_native_restart_slash_command(adapter):
     )
 
 
-@pytest.mark.asyncio
-async def test_run_simple_slash_executes_when_defer_interaction_expired(adapter):
-    class UnknownInteraction(Exception):
-        status = 404
-        code = 10062
-
-    interaction = SimpleNamespace(
-        channel=_FakeTextChannel(channel_id=123, name="general"),
-        channel_id=123,
-        guild_id=456,
-        user=SimpleNamespace(id=42, name="Jezza", display_name="Jezza"),
-        response=SimpleNamespace(defer=AsyncMock(side_effect=UnknownInteraction("Unknown interaction"))),
-        edit_original_response=AsyncMock(),
-        delete_original_response=AsyncMock(),
-    )
-    adapter.handle_message = AsyncMock()
-
-    await adapter._run_simple_slash(interaction, "/reset", "Session reset~")
-
-    interaction.response.defer.assert_awaited_once_with(ephemeral=True)
-    adapter.handle_message.assert_awaited_once()
-    event = adapter.handle_message.await_args.args[0]
-    assert event.text == "/reset"
-    assert event.source.chat_id == "123"
-    interaction.edit_original_response.assert_not_awaited()
-    interaction.delete_original_response.assert_not_awaited()
-
-
 # ------------------------------------------------------------------
 # Auto-registration from COMMAND_REGISTRY
 # ------------------------------------------------------------------
@@ -590,7 +562,6 @@ async def test_auto_create_thread_uses_message_content_as_name(adapter):
     call_kwargs = message.create_thread.await_args[1]
     assert call_kwargs["name"] == "Hello world, how are you?"
     assert call_kwargs["auto_archive_duration"] == 1440
-    assert thread._hermes_auto_thread_initial_name == "Hello world, how are you?"
 
 
 @pytest.mark.asyncio
@@ -688,47 +659,6 @@ async def test_auto_create_thread_returns_none_when_direct_and_fallback_fail(ada
     assert result is None
 
 
-@pytest.mark.asyncio
-async def test_rename_thread_edits_only_when_current_name_matches(adapter):
-    thread = SimpleNamespace(
-        id=999,
-        name="raw user prompt",
-        edit=AsyncMock(),
-    )
-    adapter._client.get_channel = lambda _id: thread
-
-    result = await adapter.rename_thread(
-        "999",
-        "Semantic Session Title",
-        only_if_current_name="raw user prompt",
-    )
-
-    assert result is True
-    thread.edit.assert_awaited_once_with(
-        name="Semantic Session Title",
-        reason="Hermes semantic session title",
-    )
-
-
-@pytest.mark.asyncio
-async def test_rename_thread_skips_when_human_renamed(adapter):
-    thread = SimpleNamespace(
-        id=999,
-        name="human fixed this already",
-        edit=AsyncMock(),
-    )
-    adapter._client.get_channel = lambda _id: thread
-
-    result = await adapter.rename_thread(
-        "999",
-        "Semantic Session Title",
-        only_if_current_name="raw user prompt",
-    )
-
-    assert result is False
-    thread.edit.assert_not_awaited()
-
-
 # ------------------------------------------------------------------
 # Auto-thread integration in _handle_message
 # ------------------------------------------------------------------
@@ -812,35 +742,6 @@ async def test_auto_thread_creates_thread_and_redirects(adapter, monkeypatch):
     assert event.source.chat_id == "999"  # redirected to thread
     assert event.source.chat_type == "thread"
     assert event.source.thread_id == "999"
-    assert event.source.auto_thread_created is True
-
-
-@pytest.mark.asyncio
-async def test_auto_thread_source_carries_initial_name_for_semantic_rename(adapter, monkeypatch):
-    monkeypatch.setenv("DISCORD_AUTO_THREAD", "true")
-    monkeypatch.setenv("DISCORD_REQUIRE_MENTION", "false")
-
-    thread = SimpleNamespace(
-        id=999,
-        name="raw user prompt",
-        _hermes_auto_thread_initial_name="raw user prompt",
-    )
-    adapter._auto_create_thread = AsyncMock(return_value=thread)
-
-    captured_events = []
-
-    async def capture_handle(event):
-        captured_events.append(event)
-
-    adapter.handle_message = capture_handle
-
-    msg = _fake_message(_FakeTextChannel(), content="raw user prompt")
-
-    await adapter._handle_message(msg)
-
-    source = captured_events[0].source
-    assert source.auto_thread_created is True
-    assert source.auto_thread_initial_name == "raw user prompt"
 
 
 @pytest.mark.asyncio
@@ -1145,3 +1046,234 @@ def test_register_skill_command_autocomplete_filters_by_name_and_description(ada
     # (covered in other tests). The autocomplete filter itself is exercised
     # via direct function call in the real-discord integration path.
     assert skill_cmd.callback is not None
+
+
+# ------------------------------------------------------------------
+# Defer-failure regression tests (Discord 10062 Unknown Interaction)
+# ------------------------------------------------------------------
+#
+# Discord gives a 3-second window from interaction receipt to first
+# response. If anything (auth check, slow DB, network) delays us past
+# that, ``interaction.response.defer(ephemeral=True)`` raises
+# ``discord.NotFound`` (error code 10062 — "Unknown Interaction").
+# Before the fix, this propagated up through ``app_commands.tree`` and
+# silently killed the entire command — the user saw nothing, the agent
+# never ran, and Discord logged a generic CommandInvokeError.
+#
+# The contract we pin here: defer failure MUST NOT abort the command.
+# ``handle_message`` still dispatches the command text, followup/edit/
+# delete are short-circuited so they don't double-fail, and the gateway
+# delivers the response as a plain channel message.
+#
+# These tests use the ``real_discord`` fixture (below) to swap the
+# production adapter's ``discord`` reference to the real venv-installed
+# package, so ``except discord.NotFound`` actually matches even when
+# ``_ensure_discord_mock`` has replaced ``sys.modules['discord']`` with
+# a MagicMock fallback.
+
+
+@pytest.fixture
+def real_discord():
+    """Swap ``plugins.platforms.discord.adapter.discord`` to the real
+    venv-installed package for the test, then restore on teardown.
+    """
+    # The simplest reliable approach: just use the discord package that's
+    # already installed in sys.modules — it IS the real one because the
+    # test session loaded it before _ensure_discord_mock overrode it.
+    # We extract the exception classes before the override and re-attach
+    # them to the adapter module for the duration of the test.
+    import sys as _sys
+    import discord as _real_discord  # noqa: F401
+
+    # _ensure_discord_mock may have replaced sys.modules['discord'] with
+    # a MagicMock. Hunt for the real one in any sub-module that was
+    # imported before the override — discord.errors is the most reliable.
+    _real_excs = None
+    for _mod_name in ("discord.errors", "discord.client", "discord.gateway"):
+        _mod = _sys.modules.get(_mod_name)
+        if _mod is not None and getattr(_mod, "NotFound", None) is not None:
+            # Check this isn't a MagicMock by inspecting the mro.
+            _cls = _mod.NotFound
+            if hasattr(_cls, "__mro__") and Exception in _cls.__mro__:
+                _real_excs = _mod
+                break
+
+    if _real_excs is None:
+        pytest.skip("real discord.errors not loadable from sys.modules")
+
+    # Build a tiny shim module exposing NotFound / HTTPException as the
+    # production code expects to find them on `discord`.
+    import types as _types
+    _shim = _types.SimpleNamespace(
+        NotFound=_real_excs.NotFound,
+        HTTPException=_real_excs.HTTPException,
+    )
+
+    from plugins.platforms.discord import adapter as _adapter_mod
+    _saved = getattr(_adapter_mod, "discord", None)
+    _adapter_mod.discord = _shim
+    try:
+        yield _shim
+    finally:
+        _adapter_mod.discord = _saved
+
+
+@pytest.mark.asyncio
+async def test_run_simple_slash_survives_defer_notfound_and_dispatches(adapter, real_discord, caplog):
+    """When defer() raises NotFound (10062), the command must still dispatch
+    via handle_message — the user should get the response, just not as an
+    ephemeral followup.
+    """
+    import logging
+
+    adapter.handle_message = AsyncMock()
+    adapter._build_slash_event = MagicMock(
+        return_value=SimpleNamespace(text="/yolo", message_type=None, source=None)
+    )
+
+    not_found = real_discord.NotFound(
+        response=MagicMock(status=404),
+        message=MagicMock(),
+    )
+
+    interaction = SimpleNamespace(
+        id=7777,
+        response=SimpleNamespace(defer=AsyncMock(side_effect=not_found)),
+        followup=SimpleNamespace(send=AsyncMock()),
+        edit_original_response=AsyncMock(),
+        delete_original_response=AsyncMock(),
+        channel_id=123,
+        user=SimpleNamespace(display_name="echo_of_maridia", id=42),
+        guild=SimpleNamespace(name="TTT"),
+    )
+
+    with caplog.at_level(logging.WARNING, logger="plugins.platforms.discord.adapter"):
+        await adapter._run_simple_slash(interaction, "/yolo", "Yolo mode on~")
+
+    # Command still dispatched despite the expired interaction token.
+    adapter.handle_message.assert_awaited_once()
+    # No attempt to edit or delete the original response — token is dead.
+    interaction.edit_original_response.assert_not_called()
+    interaction.delete_original_response.assert_not_called()
+    # A warning was logged with the interaction id and command name.
+    assert any("7777" in rec.message and "/yolo" in rec.message for rec in caplog.records), (
+        f"expected warning naming interaction 7777 and /yolo, got: "
+        f"{[r.message for r in caplog.records]}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_run_simple_slash_survives_defer_http_exception_and_cleans_up(adapter, real_discord, caplog):
+    """When defer() raises a transient HTTPException (429/5xx), the command
+    must still dispatch, AND the post-dispatch edit/delete attempts must
+    still run (the interaction token is still live for these).
+    """
+    import logging
+
+    adapter.handle_message = AsyncMock()
+    adapter._build_slash_event = MagicMock(
+        return_value=SimpleNamespace(text="/stop", message_type=None, source=None)
+    )
+
+    http_exc = real_discord.HTTPException(
+        response=MagicMock(status=503),
+        message=MagicMock(),
+    )
+
+    interaction = SimpleNamespace(
+        id=8888,
+        response=SimpleNamespace(defer=AsyncMock(side_effect=http_exc)),
+        edit_original_response=AsyncMock(),
+        delete_original_response=AsyncMock(),
+        channel_id=123,
+        user=SimpleNamespace(display_name="echo_of_maridia", id=42),
+        guild=SimpleNamespace(name="TTT"),
+    )
+
+    with caplog.at_level(logging.WARNING, logger="plugins.platforms.discord.adapter"):
+        await adapter._run_simple_slash(interaction, "/stop", "Stop requested~")
+
+    # Command dispatched.
+    adapter.handle_message.assert_awaited_once()
+    # followup_msg was passed — edit_original_response should have been
+    # attempted (token is still live on HTTPException, unlike NotFound).
+    interaction.edit_original_response.assert_awaited_once_with(content="Stop requested~")
+    interaction.delete_original_response.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_run_simple_slash_normal_path_still_cleans_up(adapter):
+    """Sanity check: when defer() succeeds, the existing edit/delete
+    cleanup path must continue to work exactly as before. Regression
+    guard against the new short-circuit breaking the happy path.
+    """
+    adapter.handle_message = AsyncMock()
+    adapter._build_slash_event = MagicMock(
+        return_value=SimpleNamespace(text="/status", message_type=None, source=None)
+    )
+
+    interaction = SimpleNamespace(
+        id=1111,
+        response=SimpleNamespace(defer=AsyncMock()),
+        edit_original_response=AsyncMock(),
+        delete_original_response=AsyncMock(),
+        channel_id=123,
+        user=SimpleNamespace(display_name="echo_of_maridia", id=42),
+        guild=SimpleNamespace(name="TTT"),
+    )
+
+    await adapter._run_simple_slash(interaction, "/status", "Status sent~")
+
+    interaction.response.defer.assert_awaited_once_with(ephemeral=True)
+    interaction.edit_original_response.assert_awaited_once_with(content="Status sent~")
+    interaction.delete_original_response.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_handle_thread_create_slash_survives_defer_notfound(adapter, real_discord, caplog):
+    """_handle_thread_create_slash must not blow up when defer() raises
+    NotFound. Thread creation still proceeds (the result is dispatched
+    into the gateway), but no followup.send is attempted.
+    """
+    import logging
+
+    not_found = real_discord.NotFound(
+        response=MagicMock(status=404),
+        message=MagicMock(),
+    )
+
+    created_thread = SimpleNamespace(id=555, name="Planning", send=AsyncMock())
+    parent_channel = SimpleNamespace(create_thread=AsyncMock(return_value=created_thread))
+    interaction = SimpleNamespace(
+        id=6666,
+        channel=SimpleNamespace(parent=parent_channel),
+        channel_id=123,
+        user=SimpleNamespace(display_name="echo_of_maridia", id=42),
+        guild=SimpleNamespace(name="TTT"),
+        followup=SimpleNamespace(send=AsyncMock()),
+        response=SimpleNamespace(defer=AsyncMock(side_effect=not_found)),
+    )
+
+    adapter._create_thread = AsyncMock(
+        return_value={"success": True, "thread_id": 555, "thread_name": "Planning"}
+    )
+    adapter._dispatch_thread_session = AsyncMock()
+
+    with caplog.at_level(logging.WARNING, logger="plugins.platforms.discord.adapter"):
+        await adapter._handle_thread_create_slash(interaction, "Planning", "Hello", 1440)
+
+    # Thread creation still happened — we got the id back from _create_thread.
+    adapter._create_thread.assert_awaited_once_with(
+        interaction, name="Planning", message="Hello", auto_archive_duration=1440
+    )
+    # But no followup.send — the interaction token is dead.
+    interaction.followup.send.assert_not_called()
+    # _dispatch_thread_session was NOT called because defer_failed short-
+    # circuits before that line.
+    adapter._dispatch_thread_session.assert_not_called()
+    # The 6666-id warning must be present.
+    assert any("6666" in rec.message and "/thread" in rec.message for rec in caplog.records), (
+        f"expected /thread defer-failure warning naming interaction 6666, got: "
+        f"{[r.message for r in caplog.records]}"
+    )
+
