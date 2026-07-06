@@ -64,6 +64,10 @@ class MockPluginContext:
         # acomplete / acomplete_structured call, with parsed=None
         # (forces ScriptAuthor to fall through to its error path).
         self.llm = _StubLlm()
+        # Captured at register() time so tests can assert on what
+        # the wiring produced. Set by register() reading them.
+        self.runtime = None
+        self.script_author = None
 
     # -- surface area used by register() -----------------------------------
 

@@ -66,14 +66,102 @@ class TestRegisterSurfaces:
         assert "workflow" in ctx.cli_commands
         assert "hermes_workflow" in ctx.cli_commands["workflow"]["description"]
 
-    def test_all_eight_slash_commands_registered(self, tmp_path):
+    def test_slash_command_registered_as_single_workflow_tokenized(
+        self, tmp_path,
+    ):
+        """The plugin registers a SINGLE slash command named
+        ``workflow`` whose handler tokenizes the first word of
+        ``arg`` as a subcommand.
+
+        Rationale (see plugins/hermes_workflow/slash.py: docstring
+        at top of file):
+
+            "Hermes's slash-command protocol parses a user-typed
+            ``/foo bar baz`` into ``name='foo'``, ``arg='bar baz'``
+            ... and the gateway then invokes
+            ``plugin_handler(user_args)``. That means the plugin's
+            natural unit of registration is ONE slash command per
+            *namespace*, with the subcommand selected by the first
+            token of arg."
+
+        Earlier drafts of this test (the original author commit
+        pre-tokenization) expected 8 separate ``workflow-*``
+        registrations — that contract never matched the shipped
+        host protocol. This test pins what the plugin actually
+        does: one ``/workflow`` namespace command, with the
+        eight documented subcommands routed inside the handler.
+        See also ``test_eight_workflow_subcommands_routable_via_tokenized_dispatch``
+        below, which pins each subcommand's behavior.
+        """
         ctx = _register_plugin(tmp_path)
-        expected = {
-            "workflow-run", "workflow-list", "workflow-inspect",
-            "workflow-status", "workflow-snapshot", "workflow-cancel",
-            "workflow-save", "workflow-expand",
-        }
-        assert set(ctx.slash_commands.keys()) == expected
+        # Exactly one slash command: the ``workflow`` namespace.
+        assert set(ctx.slash_commands.keys()) == {"workflow"}
+        cmd = ctx.slash_commands["workflow"]
+        assert cmd["description"], "workflow command missing description"
+        assert cmd["handler"] is not None
+        assert callable(cmd["handler"])
+
+    def test_eight_workflow_subcommands_routable_via_tokenized_dispatch(
+        self, tmp_path,
+    ):
+        """The single ``/workflow`` command dispatches each of the
+        eight documented subcommands (run, list, inspect, status,
+        snapshot, cancel, save, expand) to its matching handler.
+
+        We invoke the registered handler directly with raw arg
+        strings and inspect what comes back. Subcommands that
+        forward to the CLI machinery return whatever the CLI
+        produced for that subcommand (often a "not found" error
+        because there's no real file ``foo`` in the test env) —
+        what matters here is the **routing** contract: every
+        subcommand must reach its branch (no ``unknown workflow
+        subcommand`` exception-in-string), no invocation may
+        raise, and the response must be a string (not ``None``).
+        Subcommands with built-in guidance (save, expand) get
+        substring assertions on top of that routing contract.
+        """
+        ctx = _register_plugin(tmp_path)
+        handler = ctx.slash_commands["workflow"]["handler"]
+
+        # Routing-only cases: just confirm the subcommand reached
+        # the right branch. We don't pin help strings because the
+        # CLI subprocess path is sensitive to test-env state.
+        routing_cases = [
+            "run foo",
+            "list",
+            "inspect foo",
+            "status",
+            "snapshot foo --tier 1",
+            "expand foo",
+        ]
+        for raw in routing_cases:
+            response = handler(raw)
+            assert response is not None, (
+                f"/workflow {raw!r} returned None — dispatcher likely "
+                f"missing the subcommand branch"
+            )
+            assert isinstance(response, str), (
+                f"/workflow {raw!r} returned non-string response: "
+                f"{type(response).__name__}"
+            )
+            assert "unknown workflow subcommand" not in response, (
+                f"/workflow {raw!r} was not routed: {response[:200]!r}"
+            )
+
+        # Bespoke-stub cases: the dispatcher returns well-known
+        # guidance strings that pin the save/expand implementations.
+        assert "usage: /workflow cancel" in handler("cancel"), (
+            "cancel must emit a usage string when called with no run_id"
+        )
+        assert "usage: /workflow save" in handler("save"), (
+            "save must emit a usage string when called with no name"
+        )
+        assert handler("save x y z").startswith(
+            "save is a v0.2.0 feature"
+        ) or "usage:" in handler("save x y z"), (
+            "save must reject >1 arg with either a usage hint or "
+            "the v0.2.0 stub guidance"
+        )
 
     def test_slash_commands_have_descriptions(self, tmp_path):
         ctx = _register_plugin(tmp_path)

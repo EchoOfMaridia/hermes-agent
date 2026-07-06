@@ -84,7 +84,9 @@ class TestJournalingBridge:
 
     def test_delegates_to_inner(self):
         class StubBridge(AgentBridge):
-            async def invoke(self, *, prompt, model, max_tokens):
+            async def invoke(self, *, prompt, model, max_tokens,
+                             tools=None, session_key=None,
+                             system_prompt=None):
                 return AgentResponse(text=f"echo: {prompt}",
                                      tokens_in=10, tokens_out=5)
 
@@ -97,11 +99,15 @@ class TestJournalingBridge:
 
     def test_set_inner_swaps(self):
         class FirstBridge(AgentBridge):
-            async def invoke(self, *, prompt, model, max_tokens):
+            async def invoke(self, *, prompt, model, max_tokens,
+                             tools=None, session_key=None,
+                             system_prompt=None):
                 return AgentResponse(text="first")
 
         class SecondBridge(AgentBridge):
-            async def invoke(self, *, prompt, model, max_tokens):
+            async def invoke(self, *, prompt, model, max_tokens,
+                             tools=None, session_key=None,
+                             system_prompt=None):
                 return AgentResponse(text="second")
 
         bridge = JournalingBridge(inner=FirstBridge())
@@ -124,7 +130,9 @@ class TestJournalingBridge:
 class TestRuntimeAskAgent:
     def test_ask_agent_returns_response(self, tmp_path):
         class StubBridge(AgentBridge):
-            async def invoke(self, *, prompt, model, max_tokens):
+            async def invoke(self, *, prompt, model, max_tokens,
+                             tools=None, session_key=None,
+                             system_prompt=None):
                 return AgentResponse(text=f"got: {prompt}",
                                      tool_calls=("Read",))
 
@@ -140,7 +148,9 @@ class TestRuntimeAskAgent:
         """End-to-end: a step calls ctx.runtime.ask_agent and the call
         appears in the journal as agent_call + agent_response."""
         class StubBridge(AgentBridge):
-            async def invoke(self, *, prompt, model, max_tokens):
+            async def invoke(self, *, prompt, model, max_tokens,
+                             tools=None, session_key=None,
+                             system_prompt=None):
                 return AgentResponse(text="analysis result",
                                      tool_calls=("Read", "Grep"),
                                      tokens_in=42, tokens_out=17)
@@ -196,4 +206,12 @@ class TestRuntimeAskAgent:
         assert prompt_chars == len("analyze this")
         assert model == "sonnet"
         assert n_responses == 1
-        assert tool_calls == ["Read", "Grep"]
+        # Legacy string-only tool_calls ("Read", "Grep") are journaled
+        # as minimal structured records ({"name": ..., "args": {},
+        # "result_chars": 0}) so legacy callers don't break the journal
+        # write. See agent_bridge.py:JournalingBridge.invoke for the
+        # conversion logic.
+        assert tool_calls == [
+            {"name": "Read", "args": {}, "result_chars": 0},
+            {"name": "Grep", "args": {}, "result_chars": 0},
+        ]

@@ -309,3 +309,44 @@ class TestScriptAuthorInEntryPoint:
         ))
         assert result.get("mode") == "ad-hoc"
         assert result.get("run_id") or result.get("error_stage")
+
+    def test_entry_point_wires_runtime_dispatcher_into_script_author(
+        self, tmp_path,
+    ):
+        """RED for Task 10 — register(ctx) threads runtime's
+        dispatcher into ScriptAuthor so live-streaming works."""
+        from plugins.hermes_workflow import register as plugin_register
+        from plugins.hermes_workflow import runtime_factory
+        runtime_factory.default_journal_root = lambda: tmp_path / "wf"
+        ctx = MockPluginContext()
+        ctx.llm = _CannedLlm(parsed={
+            "name": "demo", "description": "x",
+            "script": VALID_SCRIPT, "step_names": ["only"],
+        })
+
+        plugin_register(ctx)
+
+        # Same runtime register() constructed.
+        rt = ctx.runtime
+        assert rt is not None
+
+        captured: list = []
+
+        def _capture(evt):
+            captured.append(evt)
+
+        rt._dispatcher = _capture
+
+        tool = ctx.tools["call_workflow"]
+        asyncio.run(tool["handler"](
+            name="create a demo workflow", inputs={}, mode="ad-hoc",
+        ))
+
+        from plugins.hermes_workflow.visibility import GatewayNotice
+        notices = [e for e in captured
+                    if isinstance(e, GatewayNotice)
+                    and e.kind.startswith("script_author_")]
+        assert len(notices) >= 10
+        kinds = [n.kind for n in notices]
+        assert kinds.count("script_author_stage_started") == 5
+        assert kinds.count("script_author_stage_completed") == 5
