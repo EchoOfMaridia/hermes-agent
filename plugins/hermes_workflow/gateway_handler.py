@@ -53,6 +53,14 @@ def build_gateway_handler(runtime: Any, script_author: Any | None = None
     async def hook(event: Any, kwargs: dict) -> dict | None:
         """Inspect an incoming message event. Return None to pass through,
         or a dict to influence flow per the spec in hermes_cli/plugins.py.
+
+        This handler is `async` to support a future where `call_workflow`
+        itself is async (it already is; see tool.py). Core's
+        `invoke_hook("pre_gateway_dispatch", ...)` must therefore `await`
+        hook results before consuming them — that's part of the hermes-agent
+        fix that's landing alongside this plugin. Until that wiring ships,
+        `invoke_hook` runs synchronously and this hook's coroutine object
+        simply won't be awaited (no-op for the gateway).
         """
         text = _extract_text(event)
         if not text:
@@ -88,6 +96,102 @@ def _extract_text(event: Any) -> str:
             if isinstance(value, str):
                 return value
     return ""
+
+
+def build_pre_llm_call_fallback(
+    runtime: Any,
+    script_author: Any | None = None,
+) -> Callable[..., Any]:
+    """Portable fallback for `pre_gateway_dispatch`-style auto-invoke.
+
+    Hermes-agent's `pre_gateway_dispatch` hook is the "right" surface for
+    rewriting the inbound message text before the LLM sees it. When that
+    hook isn't yet wired up by core, the gateway-level rewrite is a no-op
+    and inbound `workflow: <intent>` / `/workflow <args>` messages fall
+    through to the LLM as plain text.
+
+    This fallback registers on `pre_llm_call` instead, which every Hermes
+    host that exposes `register_hook` already invokes once per message
+    with `user_message` as a kwarg. On a pattern match we return a
+    short ephemeral context string that nudges the LLM to call
+    `call_workflow` itself. `call_workflow` is already registered by
+    this plugin (Surface 3), so the message ends up routing through the
+    real workflow runtime — one extra LLM step on the matched message,
+    zero added behavior on the unmatched path.
+
+    Return shape: ``{"context": "..."}`` for matches, ``None`` for
+    pass-through. Matches the `pre_llm_call` contract documented in
+    ``hermes_cli/plugins.py``.
+
+    The hook IS sync (not `async def`): the runtime's `invoke_hook`
+    iterates callbacks with `cb(**kwargs)` and collects non-None
+    results without awaiting. An `async def` here would yield a
+    never-awaited coroutine warning. The patterns and decisions made
+    inside are non-blocking — pattern match + dict construction only —
+    so sync is sufficient and matches how the runtime invokes us.
+
+    The kwargs shape is whatever `invoke_hook("pre_llm_call", **kwargs)`
+    passes — historically ``{user_message, session_id, model, ...}`` but
+    new keys land over time, so we tolerate any of them.
+
+    Pattern set is the SAME as ``build_gateway_handler`` so behavior is
+    consistent whether the gateway-level or fallback path fires first.
+    """
+
+    def fallback_hook(**kwargs: Any) -> dict | None:
+        user_message = kwargs.get("user_message")
+        if not isinstance(user_message, str) or not user_message.strip():
+            return None
+
+        text = user_message
+        lowered = text.lower()
+
+        # "workflow: <intent>" — ad-hoc generation.
+        if lowered.startswith(PATTERN_AD_HOC):
+            intent = text[len(PATTERN_AD_HOC):].strip()
+            if not intent:
+                return None
+            if script_author is None:
+                hint = (
+                    f"[hermes_workflow hint] inbound 'workflow: {intent}' "
+                    "matched the ad-hoc pattern, but no ScriptAuthor is "
+                    "available in this environment. Acknowledge the user "
+                    "and tell them to save a script at "
+                    "~/.hermes/workflows/<name>.py and use "
+                    "`/workflow run <path>`."
+                )
+            else:
+                hint = (
+                    "[hermes_workflow hint] an inbound message triggered "
+                    "the 'workflow: <intent>' ad-hoc pattern. Call the "
+                    "`call_workflow` tool now with name left empty and "
+                    f"inputs={{'intent': {intent!r}}} mode='ad-hoc'. "
+                    "Do NOT respond to the user before invoking the tool."
+                )
+            return {"context": hint}
+
+        # "/workflow <args>" — slash command passthrough.
+        if lowered.startswith(PATTERN_SLASH):
+            args_str = text[len(PATTERN_SLASH):].strip()
+            if not args_str:
+                return None
+            tokens = shlex.split(args_str)
+            if not tokens:
+                return None
+            sub = tokens[0].lower()
+            if sub in ("run", "list", "status", "snapshot", "cancel",
+                        "inspect", "save", "expand"):
+                hint = (
+                    "[hermes_workflow hint] the user issued "
+                    f"`/workflow {args_str}` — a slash command this plugin "
+                    "handles directly. Surface it as a normal response "
+                    "via the appropriate plugin command path (do NOT "
+                    "answer it as a free-form LLM question)."
+                )
+                return {"context": hint}
+        return None
+
+    return fallback_hook
 
 
 async def _handle_ad_hoc(event: Any, runtime: Any, intent: str,

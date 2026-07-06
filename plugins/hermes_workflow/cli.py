@@ -138,7 +138,10 @@ def register_cli(subparsers: Any) -> None:
 async def _dispatch_async(args: argparse.Namespace) -> int:
     """Async dispatcher for the commands that need event-loop access."""
     cmd = args.workflow_command
-    rt = WorkflowRuntime(journal_root=args_journal_root())
+    # Use the runtime factory so the LLM bridge gets auto-wired from
+    # HERMES_WORKFLOW_AGENT_BRIDGE (see runtime_factory.build_runtime).
+    from .runtime_factory import build_runtime
+    rt = build_runtime(journal_root=args_journal_root())
     if cmd == "run":
         return await _cmd_run(rt, args)
     if cmd == "status":
@@ -214,6 +217,50 @@ def _parse_inputs(items: list[str]) -> dict[str, Any]:
     return out
 
 
+def _resolve_workflow_target(target: str) -> Path:
+    """Resolve a workflow ``inspect``/``run`` argument to a script path.
+
+    Order:
+    1. If ``target`` is an existing filesystem path, return it as-is.
+    2. Otherwise, look it up in the workflow library by name. If found,
+       return the resolved path.
+    3. Otherwise, raise FileNotFoundError with a helpful message.
+
+    Back-compat: v0.1.0 only accepted paths. v0.2.0 adds library-name
+    lookup so ``/workflow run <name>`` and ``/workflow inspect <name>``
+    work the same way after the user runs ``/workflow create <intent>``.
+    """
+    target_path = Path(target)
+    if target_path.exists():
+        return target_path
+
+    # Library lookup. The library lives at
+    # ``args_journal_root() / "library.json"`` for the CLI surface;
+    # but ScriptAuthor stores its manifest at
+    # ``<library_root>/library.json`` where ``<library_root>`` is
+    # passed in by the slash surface. Try both locations.
+    for manifest_path in (
+        args_journal_root() / "library.json",
+        args_journal_root() / "library" / "library.json",
+    ):
+        if manifest_path.exists():
+            try:
+                data = json.loads(manifest_path.read_text())
+                entries = data.get("entries", []) if isinstance(data, dict) else []
+                for entry in entries:
+                    if isinstance(entry, dict) and entry.get("name") == target:
+                        candidate = manifest_path.parent / entry["path"]
+                        if candidate.exists():
+                            return candidate
+            except (json.JSONDecodeError, KeyError, OSError):
+                continue
+
+    raise FileNotFoundError(
+        f"workflow script not found: {target!r} "
+        f"(neither as a path nor as a library name)"
+    )
+
+
 def _load_workflow_script(script_path: Path):
     """Import a workflow script as a Python module and return its globals."""
     if not script_path.exists():
@@ -239,7 +286,16 @@ def _load_workflow_script(script_path: Path):
 
 async def _cmd_run(rt: WorkflowRuntime, args: argparse.Namespace) -> int:
     inputs = _parse_inputs(args.inputs)
-    workflow_fn, _ = _load_workflow_script(args.script)
+    # Resolve either a path or a library name. Library lookup lets
+    # users run scripts they created with ``/workflow create`` by
+    # name (``/workflow run return_forty_two``) without having to
+    # find the file path first.
+    try:
+        resolved_path = _resolve_workflow_target(str(args.script))
+    except FileNotFoundError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    workflow_fn, _ = _load_workflow_script(resolved_path)
     kwargs: dict[str, Any] = {
         "workspace": args.workspace,
         "max_concurrent": args.max_concurrent,
@@ -298,7 +354,14 @@ async def _cmd_run(rt: WorkflowRuntime, args: argparse.Namespace) -> int:
 
 def _cmd_status(rt: WorkflowRuntime, args: argparse.Namespace) -> int:
     if args.run_id:
-        st = rt.run_status(args.run_id)
+        # ScriptAuthor synthesizes run_ids with a ``za_`` prefix
+        # (see runtime_factory.make_script_author_run_id). These
+        # don't live in the runtime's run-status map (the actual
+        # run uses the ``r_`` id returned by rt.submit internally),
+        # but the workflow journal IS on disk under that synthesized
+        # id. Resolve za_<name>_* → the workflow's journal file →
+        # derive status from the journal events.
+        st = _resolve_status(rt, args.run_id)
         if st is None:
             print(f"error: unknown run_id: {args.run_id}", file=sys.stderr)
             return 1
@@ -325,6 +388,87 @@ def _cmd_status(rt: WorkflowRuntime, args: argparse.Namespace) -> int:
                   f"completed={run['steps_completed']}, "
                   f"spawned={run['spawned_total']}")
     return 0
+
+
+def _resolve_status(rt: WorkflowRuntime, run_id: str) -> dict | None:
+    """Resolve a status for either a runtime-tracked ``r_`` run_id
+    OR a ScriptAuthor-synthesized ``za_`` run_id.
+
+    The runtime map (``rt.run_status``) only knows about ids returned
+    by ``rt.submit`` (the ``r_`` prefix). ScriptAuthor's slash surface
+    synthesizes ids with a ``za_<workflow_slug>_<8-hex>`` shape so the
+    user gets a stable handle to query even when the underlying
+    workflow is queued; those don't appear in the runtime's active
+    map. The bridge is a sidecar ``<za_run_id>.alias`` file at
+    ``<journal_root>`` (written by ScriptAuthor.generate) that maps
+    ``za_xxx`` → ``r_xxx``. We follow the alias, then read the real
+    journal for status.
+    """
+    direct = rt.run_status(run_id)
+    if direct is not None:
+        return direct
+
+    # ScriptAuthor path: resolve za_<name>_<hex> → r_<hex> via the
+    # alias sidecar, then read the real journal.
+    if run_id.startswith("za_"):
+        real_run_id = None
+        alias_path = args_journal_root() / f"{run_id}.alias"
+        if alias_path.exists():
+            try:
+                real_run_id = alias_path.read_text().strip()
+            except OSError:
+                real_run_id = None
+
+        # The real run may have completed and the alias may still
+        # exist; in that case, fall back to the runtime status map
+        # using the real id.
+        if real_run_id:
+            direct2 = rt.run_status(real_run_id)
+            if direct2 is not None:
+                return direct2
+
+        # Last resort: replay the journal under the real id.
+        journal_run_id = real_run_id or run_id
+        try:
+            from .journal import Journal
+            events = Journal.replay(journal_run_id,
+                                     args_journal_root()).events
+        except Exception:
+            return None
+        if not events:
+            return None
+        workflow = "unknown"
+        steps_completed: list[str] = []
+        steps_failed: dict[str, str] = {}
+        spawned_total = 0
+        state = "running"
+        for e in events:
+            kind = e.get("kind")
+            if kind == "workflow_started":
+                workflow = e.get("workflow", workflow)
+                spawned_total += 1
+            elif kind == "step_started":
+                spawned_total += 1
+            elif kind == "step_completed":
+                steps_completed.append(e.get("step", "?"))
+            elif kind == "step_failed":
+                steps_failed[e.get("step", "?")] = e.get("error", "")
+            elif kind == "workflow_completed":
+                state = "completed"
+            elif kind == "workflow_failed":
+                state = "failed"
+        return {
+            "run_id": run_id,
+            "workflow": workflow,
+            "state": state,
+            "steps_completed": steps_completed,
+            "steps_failed": steps_failed,
+            "spawned_total": spawned_total,
+            "max_total": 0,
+            "started_at": events[0].get("ts") if events else None,
+            "last_event_at": events[-1].get("ts") if events else None,
+        }
+    return None
 
 
 async def _cmd_cancel(rt: WorkflowRuntime, args: argparse.Namespace) -> int:
@@ -369,12 +513,26 @@ def _cmd_snapshot(args: argparse.Namespace) -> int:
     tree is computed from the journal's event stream; the renderer
     picks the per-tier layout (TUI/desktop full / chat compact /
     iMessage plain).
+
+    For ``za_`` synthesized run_ids (ScriptAuthor), the journal is
+    written under the runtime-issued ``r_`` id — resolve the alias
+    first so the snapshot actually contains the workflow events.
     """
+    from .journal import Journal
     from .visibility import EventTranslator, ThreeTierCardRenderer
 
-    journal = Journal.replay(args.run_id, args_journal_root())
+    journal_run_id = args.run_id
+    if args.run_id.startswith("za_"):
+        alias_path = args_journal_root() / f"{args.run_id}.alias"
+        if alias_path.exists():
+            try:
+                journal_run_id = alias_path.read_text().strip()
+            except OSError:
+                pass
+
+    journal = Journal.replay(journal_run_id, args_journal_root())
     tr = EventTranslator()
-    snapshot = tr.snapshot_for_run(args.run_id, journal.events)
+    snapshot = tr.snapshot_for_run(journal_run_id, journal.events)
 
     if args.as_json:
         print(json.dumps(snapshot, indent=2, default=str))
@@ -392,9 +550,20 @@ def _cmd_list(args: argparse.Namespace) -> int:
     — iterate ``entries``, not the top-level dict, or each ``entry``
     ends up a string key (e.g. ``"version"``) and ``entry.get('name')``
     crashes with ``AttributeError: 'str' object has no attribute 'get'``.
+
+    The slash surface's ScriptAuthor saves the manifest at
+    ``<journal_root>/library/library.json`` (the ``library`` Library
+    object nests under its ``root``). The CLI's legacy v0.1.0
+    convention puts it at ``<journal_root>/library.json``. We try
+    both locations so users see entries regardless of which surface
+    populated the library.
     """
-    library_path = args_journal_root() / "library.json"
-    if not library_path.exists():
+    candidates = [
+        args_journal_root() / "library.json",
+        args_journal_root() / "library" / "library.json",
+    ]
+    library_path = next((p for p in candidates if p.exists()), None)
+    if library_path is None:
         if args.as_json:
             print("[]")
         else:
@@ -418,12 +587,16 @@ def _cmd_list(args: argparse.Namespace) -> int:
 
 
 def _cmd_inspect(args: argparse.Namespace) -> int:
-    """Show a script's source + step graph. Library name or path."""
-    target = Path(args.target)
-    if not target.exists():
-        # Library name lookup (v0.2.0 stub).
-        print(f"error: {args.target} not found as a script path. "
-              f"Library lookup is a v0.2.0 feature.", file=sys.stderr)
+    """Show a script's source + step graph. Library name or path.
+
+    v0.2.0: accepts a library name in addition to a filesystem path.
+    Library lookup goes through ``_resolve_workflow_target`` which
+    consults the on-disk manifest.
+    """
+    try:
+        target = _resolve_workflow_target(args.target)
+    except FileNotFoundError as e:
+        print(f"error: {e}", file=sys.stderr)
         return 1
     workflow_fn, module_globals = _load_workflow_script(target)
     specs = collect_step_specs(module_globals)

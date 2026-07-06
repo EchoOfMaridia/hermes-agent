@@ -34,8 +34,12 @@ import argparse
 import asyncio
 import contextlib
 import io
+import logging
 import shlex
 from typing import Any
+
+
+_log = logging.getLogger("hermes_workflow.slash")
 
 
 # ---------------------------------------------------------------------------
@@ -138,7 +142,8 @@ def _dispatch_workflow(
     if sub == "expand":
         # /workflow expand <run_id>  ==  /workflow snapshot <run_id> --tier 1
         tier_args = list(rest) + ["--tier", "1"]
-        return _run_cli_capture("snapshot", " ".join(_quote(a) for a in tier_args))
+        return _run_cli_capture(runtime, "snapshot",
+                                 " ".join(_quote(a) for a in tier_args))
     if sub == "create":
         # v0.2.0 LLM ad-hoc authoring. Routes to ScriptAuthor.generate
         # when one is wired in (CLI without LLM, or stub context, falls
@@ -153,7 +158,7 @@ def _dispatch_workflow(
             f"type /workflow help for the list"
         )
     forward_arg = " ".join(_quote(a) for a in rest)
-    return _run_cli_capture(cli_subcommand, forward_arg)
+    return _run_cli_capture(runtime, cli_subcommand, forward_arg)
 
 
 def _quote(token: str) -> str:
@@ -167,37 +172,58 @@ def _quote(token: str) -> str:
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _run_cli_capture(subcommand: str, raw: str) -> str | None:
+def _run_cli_capture(runtime: Any, subcommand: str, raw: str) -> str | None:
     """Invoke the CLI machinery synchronously, capture stdout, return string.
 
     The CLI's _dispatch prints to stdout; we redirect stdout into a
     StringIO buffer for the duration of the call and return the
     captured text. This lets slash-command handlers reuse the CLI
     implementation without duplicating it.
+
+    The slash surface passes its own ``runtime`` (built with the
+    slash-surface journal root). We forward that journal root to the
+    CLI via ``HERMES_WORKFLOW_ROOT`` so that ``args_journal_root()``
+    inside the CLI resolves to the SAME root the slash surface uses —
+    otherwise /workflow run, /workflow inspect, /workflow status see
+    a different filesystem than /workflow create wrote to.
     """
+    import os as _os
     from plugins.hermes_workflow.cli import _dispatch_async, register_cli
 
     parser = argparse.ArgumentParser(prog="hermes workflow")
-    sub = parser.add_subparsers()
-    register_cli(sub)
+    register_cli(parser)
 
-    tokens = ["workflow", subcommand]
+    tokens = [subcommand]
     if raw and raw.strip():
         tokens.extend(shlex.split(raw))
 
+    # Forward the slash surface's journal root to the CLI by setting
+    # HERMES_WORKFLOW_ROOT before invoking the dispatcher. Restore
+    # the previous value (or unset) on the way out so we don't leak
+    # the override into unrelated subprocesses.
+    saved_root = _os.environ.get("HERMES_WORKFLOW_ROOT")
+    rt_root = getattr(runtime, "journal_root", None)
+    if rt_root is not None:
+        _os.environ["HERMES_WORKFLOW_ROOT"] = str(rt_root)
     try:
-        args = parser.parse_args(tokens)
-    except SystemExit:
-        return f"invalid arguments: {raw!r}"
-
-    buf = io.StringIO()
-    with contextlib.redirect_stdout(buf):
         try:
-            rc = asyncio.run(_dispatch_async(args))
-        except Exception as e:
-            return f"error: {e}"
-    out = buf.getvalue().rstrip()
-    return out or f"(exit {rc})"
+            args = parser.parse_args(tokens)
+        except SystemExit:
+            return f"invalid arguments: {' '.join(tokens)!r}"
+
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            try:
+                rc = asyncio.run(_dispatch_async(args))
+            except Exception as e:
+                return f"error: {e}"
+        out = buf.getvalue().rstrip()
+        return out or f"(exit {rc})"
+    finally:
+        if saved_root is None:
+            _os.environ.pop("HERMES_WORKFLOW_ROOT", None)
+        else:
+            _os.environ["HERMES_WORKFLOW_ROOT"] = saved_root
 
 
 def _cancel_via_runtime(runtime: Any, rest: list[str]) -> str | None:
@@ -216,7 +242,7 @@ def _create_via_script_author(
     runtime: Any,
     rest: list[str],
     script_author: Any | None,
-) -> str | None:
+) -> Any:
     """Ad-hoc authoring via ScriptAuthor.
 
     Mirrors the contract of ``gateway_handler._handle_ad_hoc``: when
@@ -225,9 +251,25 @@ def _create_via_script_author(
     to the runtime, and report the run_id. When script_author is None,
     return v0.2.0 manual-copy guidance.
 
-    Bridges the sync slash handler to the async LLM-driven path via
-    ``asyncio.run`` (matching the pattern in ``_run_cli_capture`` and
-    ``_cancel_via_runtime``).
+    Streaming behavior (Fix 1 + Fix 2 — 2026-06-30):
+
+    This function returns an **async generator** that yields strings.
+    Each yield lands as an incremental message on the chat surface
+    (Discord / Telegram / iMessage / TUI / desktop), so the user sees
+    LLM tokens as they arrive instead of staring at a spinner for 6+
+    seconds. The first yield is a "starting" indicator; intermediate
+    yields are the notifier-token deltas captured during generation;
+    the final yield is the artifact card (success) or error message
+    (failure). Coalescing into the artifact card is the gateway
+    dispatcher's job — see ``gateway/run.py:9017`` for the branch
+    logic that detects ``hasattr(result, "__aiter__")``.
+
+    Backwards compatibility: callers that pass this through
+    ``asyncio.run(_create_via_script_author(...))`` get the same
+    final coalesced string as before (the dispatcher's last return
+    is the artifact card). The new behavior only activates when the
+    gateway dispatcher's async-iterator branch consumes the generator
+    directly.
 
     Args:
         runtime:        The WorkflowRuntime singleton.
@@ -237,50 +279,141 @@ def _create_via_script_author(
                         fall back to manual-copy guidance.
 
     Returns:
-        User-visible string with run_id on success, error_stage +
-        raw_script preview on failure, or guidance when not wired.
+        AsyncIterator[str] — yields in-progress deltas, then the
+        final artifact card. Returns None (synchronously) when the
+        intent is empty or script_author is unwired.
     """
     intent = " ".join(rest).strip()
     if not intent:
-        return "usage: /workflow create <intent>"
+        return None  # empty intent — caller falls back to usage string
 
     if script_author is None:
-        return (
-            "create is a v0.2.0 feature requiring the ScriptAuthor "
-            "integration. Save your script to "
-            "~/.hermes/workflows/<name>.py and use "
-            "`/workflow run <path>`."
+        # Return a one-shot string via an async generator so the
+        # dispatcher's branch logic handles this uniformly.
+        async def _guidance():
+            yield (
+                "create is a v0.2.0 feature requiring the ScriptAuthor "
+                "integration. Save your script to "
+                "~/.hermes/workflows/<name>.py and use "
+                "`/workflow run <path>`."
+            )
+        return _guidance()
+
+    async def _stream():
+        # Capture token deltas into a list as the LLM streams. The
+        # notifier is wired BEFORE generate() starts so we don't miss
+        # the early tokens. Chain the new capture onto the prior
+        # notifier (don't replace it) so any externally-attached
+        # notifier still sees the full event sequence — the slash
+        # surface is additive, not destructive.
+        captured: list[str] = []
+        prev_notifier: Any = getattr(script_author, "notifier", None)
+
+        def _notifier(kind: str, **payload: Any) -> None:
+            if kind == "token":
+                delta = payload.get("delta", "")
+                if delta:
+                    captured.append(delta)
+            # Forward to prior notifier so externally-attached
+            # observers (statusbar, journal) still see the full event
+            # sequence. Wrap in try/except so a downstream failure
+            # can't kill our token capture.
+            if prev_notifier is not None:
+                try:
+                    prev_notifier(kind, **payload)
+                except Exception:
+                    pass
+
+        script_author.notifier = _notifier
+
+        # Yield a starting indicator so the user sees activity
+        # immediately, before the first token arrives.
+        yield f"🔨 generating workflow from: {intent!r}\n"
+
+        try:
+            # Run the async generate as a background task; flush
+            # captured tokens as a parallel consumer. We use a task so
+            # the generator can yield between captures.
+            gen_task = asyncio.create_task(
+                script_author.generate(intent=intent, runtime=runtime)
+            )
+
+            # Flush captured tokens until generate() completes.
+            last_idx = 0
+            while not gen_task.done():
+                await asyncio.sleep(0)
+                while last_idx < len(captured):
+                    yield captured[last_idx]
+                    last_idx += 1
+
+            # Drain any remaining tokens after completion.
+            while last_idx < len(captured):
+                yield captured[last_idx]
+                last_idx += 1
+
+            result = gen_task.result()
+        except Exception as e:
+            yield (
+                f"error invoking ScriptAuthor: {e}\n"
+                f"(intent was: {intent!r})"
+            )
+            return
+        finally:
+            # Restore the prior notifier (defensive: don't leak our
+            # capture closure if the dispatcher reuses the handler).
+            try:
+                script_author.notifier = prev_notifier
+            except Exception:
+                pass
+
+        if result.ok:
+            za_run_id = result.run_id
+            # Surface script body inline so the user sees what was
+            # generated (the inline-ground-truth pattern from Pitfall
+            # #23 in hermes-workflow-author). Truncate to 1200 chars
+            # with a follow-up pointer.
+            body_preview = ""
+            try:
+                with open(result.script_path, "r", encoding="utf-8") as fh:
+                    body_preview = fh.read(1200)
+            except Exception:
+                body_preview = ""
+            # Emit the artifact-posted notifier event so the
+            # streamer surfaces the posted file path and body
+            # preview. No-op when script_author has no wired notifier
+            # (the CLI shell path).
+            notifier = getattr(script_author, "notifier", None)
+            if notifier is not None:
+                try:
+                    notifier("artifact_posted", name=result.name,
+                              path=result.script_path, run_id=za_run_id,
+                              body_preview=body_preview)
+                except Exception as _exc:
+                    _log.warning("artifact_posted notifier raised: %s",
+                                 _exc)
+            yield (
+                f"\n✅ generated {result.name!r}, run_id={za_run_id}\n"
+                f"script saved at {result.script_path}\n\n"
+                f"```python\n{body_preview}\n```\n\n"
+                f"follow with `/workflow status {za_run_id}`"
+            )
+            return
+
+        # Failure: surface error_stage + a raw_script preview so the
+        # user can see what the LLM generated before the gate
+        # rejected it.
+        preview = (result.raw_script[:300] if result.raw_script else "")
+        suffix = (
+            f"\n\n--- generated script (first 300 chars) ---\n{preview}"
+            if preview
+            else ""
+        )
+        yield (
+            f"ScriptAuthor failed at stage={result.error_stage!r}: "
+            f"{result.error}{suffix}"
         )
 
-    try:
-        result = asyncio.run(
-            script_author.generate(intent=intent, runtime=runtime)
-        )
-    except Exception as e:
-        return (
-            f"error invoking ScriptAuthor: {e}\n"
-            f"(intent was: {intent!r})"
-        )
-
-    if result.ok:
-        return (
-            f"✅ generated {result.name!r}, run_id={result.run_id}\n"
-            f"script saved at {result.script_path}\n\n"
-            f"follow with `/workflow status {result.run_id}`"
-        )
-
-    # Failure: surface error_stage + a raw_script preview so the user
-    # can see what the LLM generated before the gate rejected it.
-    preview = (result.raw_script[:300] if result.raw_script else "")
-    suffix = (
-        f"\n\n--- generated script (first 300 chars) ---\n{preview}"
-        if preview
-        else ""
-    )
-    return (
-        f"ScriptAuthor failed at stage={result.error_stage!r}: "
-        f"{result.error}{suffix}"
-    )
+    return _stream()
 
 
 def _save_stub(rest: list[str]) -> str | None:

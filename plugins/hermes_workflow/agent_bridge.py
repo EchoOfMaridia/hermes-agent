@@ -63,14 +63,26 @@ class AgentResponse:
 
     Attributes:
         text:       Final text response from the agent.
-        tool_calls: Tuple of tool names invoked during the response.
+        tool_calls: Tuple of structured tool-call records invoked during
+                    the response. Each entry is a dict with keys:
+                      - ``name``:   str — tool name (e.g., "terminal",
+                                    "file_edit", "search")
+                      - ``args``:   dict — arguments passed to the tool
+                      - ``result``: str — result returned by the tool
+                                    (may be empty string for tools that
+                                    produce no output)
+                    Legacy v0.1.0 callers stored ``tool_calls`` as a
+                    tuple of strings (just names). The new contract is
+                    ``tuple[dict, ...]`` — downstream consumers that read
+                    ``r.tool_calls[0]["name"]`` will fail loudly on the
+                    legacy shape, which is the intended migration signal.
         tokens_in:  Input tokens consumed.
         tokens_out: Output tokens produced.
         duration:   Wall-clock seconds.
     """
 
     text: str
-    tool_calls: tuple[str, ...] = ()
+    tool_calls: tuple[dict, ...] = ()
     tokens_in: int = 0
     tokens_out: int = 0
     duration: float = 0.0
@@ -86,14 +98,37 @@ class AgentBridge:
     """
 
     async def invoke(self, *, prompt: str, model: str | None,
-                     max_tokens: int | None) -> AgentResponse:
+                     max_tokens: int | None,
+                     tools: list[dict] | None = None,
+                     session_key: str | None = None,
+                     system_prompt: str | None = None) -> AgentResponse:
         """Invoke the agent. Override in subclasses.
 
         Args:
-            prompt:     The user prompt to send to the agent.
-            model:      Optional model override (e.g., "sonnet", "opus").
-                        None = use the runtime default.
-            max_tokens: Optional cap on response tokens.
+            prompt:        The user prompt to send to the agent.
+            model:         Optional model override (e.g., "sonnet", "opus").
+                           None = use the runtime default.
+            max_tokens:    Optional cap on response tokens.
+            tools:         Optional list of tool definitions to expose
+                           to the agent during this call. Each entry is
+                           a dict with ``name``, ``description``, and
+                           ``schema`` (JSON Schema for the tool's args).
+                           When provided, the agent can call these tools
+                           and the resulting tool_calls appear on the
+                           returned ``AgentResponse.tool_calls`` as
+                           ``{"name", "args", "result"}`` records.
+                           None (the default) means no tools — the agent
+                           is a pure text-completer, matching v0.1.0
+                           behaviour. The list lives in-memory only;
+                           the journal records just ``tools_count``.
+            session_key:   Optional opaque string that ties this call
+                           to a multi-turn conversation. Successive
+                           calls with the same ``session_key`` share
+                           message history (when the inner bridge
+                           supports it). None = one-shot call, no
+                           threading.
+            system_prompt: Optional system prompt override for this
+                           call. None = use the inner bridge default.
 
         Returns:
             AgentResponse with the final text and metadata.
@@ -131,7 +166,10 @@ class JournalingBridge(AgentBridge):
         self._inner = inner
 
     async def invoke(self, *, prompt: str, model: str | None,
-                     max_tokens: int | None) -> AgentResponse:
+                     max_tokens: int | None,
+                     tools: list[dict] | None = None,
+                     session_key: str | None = None,
+                     system_prompt: str | None = None) -> AgentResponse:
         from .dsl.primitives import get_current_run
         from .journal import Journal
 
@@ -145,6 +183,19 @@ class JournalingBridge(AgentBridge):
         # - prompt_preview: optional first N chars, opt-in via
         #   HERMES_WORKFLOW_PROMPT_PREVIEW_CHARS env var. Defaults to
         #   None (no preview) — prompts can contain sensitive data.
+        # - tools_count: number of tool definitions the agent had
+        #   access to during this call. The full tool schemas live
+        #   in-memory only (forwarded to the inner bridge) so the
+        #   journal stays compact; live surfaces (desktop subagent
+        #   windows, gateway stream, terminal output) get the full
+        #   list from the in-memory AgentResponse on response.
+        # - session_key: optional threading key that ties this call
+        #   to a multi-turn conversation. Verifiers use it to
+        #   correlate "step 3 was the 4th turn in session X."
+        # - system_prompt_chars: privacy-preserving length. The
+        #   preview is NOT journaled even when opt-in is set —
+        #   system prompts are operational, not user data, but the
+        #   full text is rarely needed for verification.
         if run is not None:
             call_index = run.next_agent_call_index()
             run.journal.append({
@@ -156,6 +207,9 @@ class JournalingBridge(AgentBridge):
                 "prompt_preview": _prompt_preview(prompt),
                 "model": model,
                 "max_tokens": max_tokens,
+                "tools_count": len(tools) if tools else 0,
+                "session_key": session_key,
+                "system_prompt_chars": len(system_prompt) if system_prompt else 0,
             })
             run.touch()
 
@@ -168,16 +222,42 @@ class JournalingBridge(AgentBridge):
 
         response = await self._inner.invoke(
             prompt=prompt, model=model, max_tokens=max_tokens,
+            tools=tools, session_key=session_key,
+            system_prompt=system_prompt,
         )
 
-        # Record the agent_response event.
+        # Record the agent_response event. Tool calls are journaled as
+        # structured records (name/args/result_chars) rather than just
+        # names — verifiers and replay tools need the args+result to
+        # reconstruct what the agent actually did. The ``result_chars``
+        # field is the length only; the full ``result`` text is kept
+        # in-memory on AgentResponse.tool_calls for live surfaces but
+        # not journaled (results can be large — e.g. ``pytest`` output).
         if run is not None:
+            tool_calls_records = []
+            for tc in (response.tool_calls or ()):
+                if isinstance(tc, dict):
+                    # New structured shape.
+                    tool_calls_records.append({
+                        "name": tc.get("name", ""),
+                        "args": tc.get("args", {}),
+                        "result_chars": len(tc.get("result", "")),
+                    })
+                else:
+                    # Legacy shape (just a name string). Preserve as
+                    # a minimal record so old callers don't break the
+                    # journal write.
+                    tool_calls_records.append({
+                        "name": str(tc),
+                        "args": {},
+                        "result_chars": 0,
+                    })
             run.journal.append({
                 "kind": Journal.KIND_AGENT_RESPONSE,
                 "run_id": run.run_id,
                 "step": run.current_step_name,
                 "call_index": call_index,
-                "tool_calls": list(response.tool_calls),
+                "tool_calls": tool_calls_records,
                 "tokens_in": response.tokens_in,
                 "tokens_out": response.tokens_out,
                 "duration": time.time() - start,

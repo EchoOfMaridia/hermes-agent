@@ -100,6 +100,7 @@ class EventTranslator:
     def __init__(self) -> None:
         self._step_counters: dict[str, StepCallCounter] = {}
         self._step_attempts: dict[str, int] = {}
+        self._script_author_token_index: int = 0
 
     def _counter_for(self, step_name: str) -> StepCallCounter:
         c = self._step_counters.get(step_name)
@@ -241,6 +242,111 @@ class EventTranslator:
                        "reason": event.get("reason", "user_cancelled")},
             )
         # Unknown kind — skip. Adapters never see a partial event.
+        return None
+
+    # -- script_author notifier events --------------------------------------
+
+    def translate_script_author_event(
+        self, event: tuple[str, dict[str, Any]],
+    ) -> Any:
+        """Translate a ScriptAuthor notifier callback to a StreamEvent.
+
+        ``event`` is the ``(kind, payload)`` tuple ScriptAuthor emits
+        from its ``_emit`` helper. Returns a StreamEvent subclass or
+        ``None`` for unknown kinds.
+
+        Per-kind mapping:
+
+        - ``stage_started(kind=..., text=stage_name, extra=...)``
+          → stage + state payload
+        - ``stage_completed``: same shape with ``state="completed"``
+        - ``stage_failed``:    same shape with ``state="failed"`` and
+          ``kind="script_author_stage_failed"`` to make filtering easy
+          in the statusbar
+        - ``token`` →
+          ``ToolCallChunk(tool_name="script_author_llm",
+          preview=<delta>, args={"stage":...}, index=N)`` with
+          monotonic index counter ``_script_author_token_index``
+        - ``llm_completed`` →
+          ``ToolCallFinished(tool_name="script_author_llm", ok=True)``
+          matching the most recent chunk's index
+        - ``artifact_posted`` →
+          ``LongToolHint(text=<body preview>, extra={"kind":
+          "script_author_artifact", "name":..., "path":...,
+          "run_id":...})``
+        """
+        kind, payload = event
+        if kind == "stage_started":
+            return GatewayNotice(
+                kind="script_author_stage_started",
+                text=str(payload.get("stage", "")),
+                extra={
+                    "stage": payload.get("stage", ""),
+                    "state": "started",
+                },
+            )
+        if kind == "stage_completed":
+            stage = str(payload.get("stage", ""))
+            return GatewayNotice(
+                kind="script_author_stage_completed",
+                text=f"{stage} done",
+                extra={
+                    "stage": stage,
+                    "state": "completed",
+                    "ok": payload.get("ok", True),
+                },
+            )
+        if kind == "stage_failed":
+            stage = str(payload.get("stage", ""))
+            error = str(payload.get("error", ""))
+            return GatewayNotice(
+                kind="script_author_stage_failed",
+                text=f"{stage} failed: {error}",
+                extra={
+                    "stage": stage,
+                    "state": "failed",
+                    "error": error,
+                },
+            )
+        if kind == "token":
+            self._script_author_token_index += 1
+            return ToolCallChunk(
+                tool_name="script_author_llm",
+                preview=str(payload.get("delta", ""))[:80],
+                args={"stage": payload.get("stage", "")},
+                index=self._script_author_token_index,
+            )
+        if kind == "llm_completed":
+            idx = self._script_author_token_index or 1
+            return ToolCallFinished(
+                tool_name="script_author_llm",
+                duration=0.0,
+                ok=True,
+                index=idx,
+            )
+        if kind == "artifact_posted":
+            name = str(payload.get("name", ""))
+            path = str(payload.get("path", ""))
+            run_id = str(payload.get("run_id", ""))
+            body = str(payload.get("body_preview", ""))
+            text = (
+                f"📄 ScriptAuthor posted artifact: {name}\n"
+                f"  path: {path}\n"
+                f"  run_id: {run_id}\n\n"
+                + body
+            )
+            # Use a GatewayNotice for the artifact signal —
+            # LongToolHint is reserved for runtime's long-tool nudges.
+            # The artifact text lives in the notice text itself.
+            return GatewayNotice(
+                kind="script_author_artifact",
+                text=text,
+                extra={
+                    "name": name,
+                    "path": path,
+                    "run_id": run_id,
+                },
+            )
         return None
 
     # -- snapshot / inspection helpers --------------------------------------

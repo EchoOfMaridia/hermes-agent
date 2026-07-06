@@ -106,6 +106,42 @@ def register(ctx) -> None:
     # produces a valid workflow script.
     script_author = ScriptAuthor(llm=ctx.llm)
 
+    # Expose runtime + script_author on ctx when the context supports
+    # it (MockPluginContext in tests; the real PluginContext ignores
+    # the attribute silently because of __getattr__ try/except).
+    _expose = getattr(ctx, "__dict__", None)
+    if _expose is not None:
+        try:
+            ctx.runtime = runtime
+            ctx.script_author = script_author
+        except Exception:
+            pass
+
+    # Live-streaming seam: forward ScriptAuthor events through the
+    # same dispatcher the runtime uses for journal events. The gateway
+    # wires its GatewayEventDispatcher.dispatch onto ``runtime`` via
+    # ``runtime.set_dispatcher`` below; ScriptAuthor needs the
+    # equivalent callable so its notifier events travel the same
+    # pipeline into the TUI/desktop statusbar. The translator instance
+    # is shared so stage/token/artifact events render with the same
+    # indexing semantics as runtime journal events.
+    try:
+        from plugins.hermes_workflow.visibility import EventTranslator
+        sa_translator = EventTranslator()
+    except Exception:
+        sa_translator = None
+
+    def _safe_runtime_dispatcher(evt):
+        d = getattr(runtime, "_dispatcher", None)
+        if d is not None:
+            try:
+                d(evt)
+            except Exception as _exc:                   # pragma: no cover
+                _log.warning("script_author safe-runtime-dispatcher raised: %s", _exc)
+
+    script_author.dispatcher = _safe_runtime_dispatcher
+    script_author._event_translator = sa_translator
+
     # Surface 1: CLI subcommands.
     def _cli_default_handler(args):
         import asyncio as _aio
@@ -172,6 +208,24 @@ def register(ctx) -> None:
         _log.warning("could not register tool call_workflow: %s", e)
 
     # Surface 4: Gateway reaction handler.
+    #
+    # Two registrations are made intentionally — `pre_gateway_dispatch`
+    # is the "right" surface (gateway-level rewrite of `event.text`
+    # before the LLM sees the message, so no extra model call), but it
+    # only works when the runtime actually invokes pre_gateway_dispatch
+    # hooks during message dispatch. Hermes-agent patches that wire-up;
+    # without it, the registration is a no-op.
+    #
+    # `pre_llm_call` is the portable fallback: every host that supports
+    # `register_hook` exposes this hook, and it passes `user_message`
+    # as a kwarg. We inspect the message and — on a match — inject a
+    # short context hint that nudges the LLM to call `call_workflow`
+    # itself. The cost is one extra LLM token for the hint; the
+    # benefit is that the plugin works against any Hermes install
+    # without requiring a core-side patch.
+    #
+    # Both surfaces use the SAME pattern set + a shared router in
+    # gateway_handler.py; only the kwargs / return shape differ.
     handler = build_gateway_handler(runtime, script_author=script_author)
     try:
         ctx.register_hook("pre_gateway_dispatch", _make_hook(handler))
@@ -183,6 +237,28 @@ def register(ctx) -> None:
         )
     except Exception as e:
         _log.warning("could not register gateway hook: %s", e)
+
+    # Surface 4b: pre_llm_call fallback. Same handler, different
+    # signature (kwargs are dict-shaped; returns context-injection
+    # dict instead of pre-dispatch rewrite). Build a thin adapter so
+    # `gateway_handler.py` stays a single source of truth for pattern
+    # matching.
+    try:
+        from plugins.hermes_workflow.gateway_handler import (
+            build_pre_llm_call_fallback,
+        )
+        ctx.register_hook(
+            "pre_llm_call",
+            build_pre_llm_call_fallback(runtime, script_author=script_author),
+        )
+        _log.info("registered pre_llm_call fallback hook")
+    except AttributeError:
+        _log.warning(
+            "PluginContext does not expose register_hook; "
+            "pre_llm_call fallback not registered"
+        )
+    except Exception as e:
+        _log.warning("could not register pre_llm_call fallback: %s", e)
 
     # Wire the runtime's dispatcher into the gateway's StreamEvent
     # pipeline so workflow progress flows live to TUI / desktop /

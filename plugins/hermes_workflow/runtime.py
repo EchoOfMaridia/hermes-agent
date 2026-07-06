@@ -617,16 +617,47 @@ class WorkflowRuntime:
             self._agent_bridge = JournalingBridge(inner=bridge)
 
     async def ask_agent(self, *, prompt: str, model: str | None = None,
-                        max_tokens: int | None = None) -> AgentResponse:
+                        max_tokens: int | None = None,
+                        tools: list[dict] | None = None,
+                        session_key: str | None = None,
+                        system_prompt: str | None = None) -> AgentResponse:
         """Invoke the agent bridge. The bridge journals the call.
 
         This is the only way a workflow script invokes the LLM agent.
-        Steps call `await ctx.runtime.ask_agent(...)`. The bridge's
+        Steps call ``await ctx.runtime.ask_agent(...)``. The bridge's
         contract: journal the call, invoke the inner LLM, journal the
-        response, return AgentResponse.
+        response, return ``AgentResponse``.
+
+        Args:
+            prompt:        The user prompt to send to the agent.
+            model:         Optional model override (``"sonnet"``, ``"opus"``,
+                           ``"haiku"``, etc.). ``None`` = use the inner
+                           bridge's default.
+            max_tokens:    Optional cap on response tokens.
+            tools:         Optional list of tool definitions the agent
+                           can call during this turn. Each entry is a
+                           dict with ``name``, ``description``, and
+                           ``schema`` (JSON Schema). Results from the
+                           agent's tool use surface on
+                           ``AgentResponse.tool_calls`` as
+                           ``{"name", "args", "result"}`` records.
+                           ``None`` = no tools (pure text completion,
+                           v0.1.0 behaviour). Full tool list lives
+                           in-memory; the journal records only the count.
+            session_key:   Optional opaque string that threads this call
+                           into a multi-turn conversation. Successive
+                           calls with the same key share history when
+                           the inner bridge supports threading.
+                           ``None`` = one-shot call.
+            system_prompt: Optional system prompt override for this call.
+
+        Returns:
+            AgentResponse with the final text and structured tool_calls.
         """
         return await self._agent_bridge.invoke(
             prompt=prompt, model=model, max_tokens=max_tokens,
+            tools=tools, session_key=session_key,
+            system_prompt=system_prompt,
         )
 
     # -- visibility dispatcher --------------------------------------------
