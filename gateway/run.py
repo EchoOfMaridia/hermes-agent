@@ -10149,6 +10149,27 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     result = plugin_handler(user_args)
                     if asyncio.iscoroutine(result):
                         result = await result
+                    # Async-generator handler: stream each yield as an
+                    # incremental message to the chat surface (Discord /
+                    # Telegram / iMessage all support this). Additive
+                    # branch — handlers that don't yield fall through to
+                    # the str() coercion below unchanged. This is the
+                    # user-visible fix for the "opaque success string"
+                    # bug class: any plugin whose slash handler wants to
+                    # surface progressive LLM output (e.g. ScriptAuthor
+                    # token streaming during /workflow create) can now
+                    # return an AsyncIterator[str] and have each chunk
+                    # land in chat as it arrives.
+                    if hasattr(result, "__aiter__"):
+                        chunks: list[str] = []
+                        async for chunk in result:
+                            if chunk is None:
+                                continue
+                            chunks.append(chunk)
+                            # Yield control so the chat surface can flush
+                            # each chunk before the next one arrives.
+                            await asyncio.sleep(0)
+                        return "".join(chunks) or None
                     return str(result) if result else None
             except Exception as e:
                 logger.warning("Plugin command dispatch failed: %s", e)

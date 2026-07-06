@@ -7040,6 +7040,64 @@ def extract_content_or_reasoning(response) -> str:
     return ""
 
 
+def _iter_async_stream(source):
+    """Adapt a streaming response into an async iterator.
+
+    The OpenAI async client (``client.chat.completions.create(stream=True)``)
+    returns an ``AsyncStream`` (an async iterator) once awaited (openai
+    >=1.0) or directly (legacy SDK). Some ancillary code paths
+    (mocked clients in tests; sync generators) may return a sync
+    iterable — we adapt them transparently so the streaming seam is
+    robust to stubbing and to real provider SDKs alike.
+
+    Cancellation: ``asyncio.CancelledError`` propagated from the
+    consumer's ``__anext__`` flows back into the underlying SDK,
+    which closes the HTTP connection cleanly.
+
+    Defense in depth: if ``source`` is a coroutine (some providers
+    leak an un-awaited coroutine into the streaming path; e.g. an
+    older async_call_llm wrapper that does ``return _iter_async_stream(
+    client.create(stream=True))`` without awaiting ``create()`` first),
+    we await it here so the downstream ``async for`` sees the
+    AsyncStream and not a coroutine. Without this guard, the consumer
+    fails with ``TypeError: 'coroutine' object is not iterable`` on
+    the first chunk — the regression that bit /workflow create
+    against the minimax provider on 2026-06-30.
+    """
+    import asyncio as _asyncio
+    if _asyncio.iscoroutine(source):
+        # Wrap the await in an async generator so the consumer's
+        # ``async for ... in stream_iter`` sees a uniform async-iter
+        # surface. Yields nothing on the await path; the second yield
+        # is the actual AsyncStream from the awaited result, but the
+        # consumer treats our wrapper as the iterator, so we need to
+        # adapt differently: see below.
+        #
+        # Easiest robust path: eagerly await inside an async
+        # generator and yield from the resolved AsyncStream. This
+        # is a 2-line adapter.
+        async def _await_then_iter():
+            real = await source
+            if hasattr(real, "__aiter__"):
+                async for chunk in real:
+                    yield chunk
+            else:
+                # Resolved value is a sync iterable — adapt.
+                for chunk in real:
+                    yield chunk
+
+        return _await_then_iter()
+
+    if hasattr(source, "__aiter__"):
+        return source
+
+    async def _wrap():
+        for chunk in source:                       # sync iteration
+            yield chunk
+
+    return _wrap()
+
+
 async def async_call_llm(
     task: str = None,
     *,
@@ -7054,10 +7112,23 @@ async def async_call_llm(
     tools: list = None,
     timeout: float = None,
     extra_body: dict = None,
+    stream: bool = False,
 ) -> Any:
     """Centralized asynchronous LLM call.
 
     Same as call_llm() but async. See call_llm() for full documentation.
+
+    When ``stream=True``, ``kwargs["stream"]`` is forwarded to the
+    underlying ``client.chat.completions.create(**kwargs)`` and the
+    function returns an async iterator over the raw chunks (each
+    ``ChatCompletionChunk``-shaped object the OpenAI async client
+    yields). Validation and ``Retry-Once`` semantics are disabled in
+    the streaming path — the consumer is responsible for accumulating
+    chunks and surfacing them to its own translator. Cancellation
+    (``asyncio.CancelledError``) propagates to the underlying client.
+
+    When ``stream=False`` (default), the existing validated-response
+    contract is preserved exactly.
     """
     resolved_provider, resolved_model, resolved_base_url, resolved_api_key, resolved_api_mode = _resolve_task_provider_model(
         task, provider, model, base_url, api_key)
@@ -7134,6 +7205,47 @@ async def async_call_llm(
         temperature=temperature, max_tokens=max_tokens,
         tools=tools, timeout=effective_timeout, extra_body=effective_extra_body,
         base_url=_client_base or resolved_base_url)
+    if stream:
+        kwargs["stream"] = True
+
+    # Streaming fast path: pass through to the OpenAI async streaming
+    # client and adapt the streaming object into an async iterator.
+    # We bypass the validation+Retry-Once chain so callers accumulate
+    # chunks in order without truncation. Cancellation
+    # (asyncio.CancelledError) propagates to the underlying SDK.
+    #
+    # SDK shape history:
+    # - openai<1.0 (legacy): client.chat.completions.create(stream=True)
+    #   returned an AsyncStream directly — calling it was not awaitable.
+    # - openai>=1.0 (current, e.g. 2.x): the same call ALWAYS returns
+    #   a coroutine; the AsyncStream only materializes after `await`.
+    # Treating the return value as already-iterable (the legacy contract)
+    # leaks a coroutine into the consumer, which then fails with
+    # ``TypeError: 'coroutine' object is not iterable`` on the first
+    # ``async for`` (the regression that bit /workflow create on
+    # 2026-06-30 against the minimax provider).
+    #
+    # We ``inspect.isawaitable``-detect the return value and await it
+    # when necessary. _iter_async_stream then sees the AsyncStream
+    # (or a sync iterable) and adapts transparently. The legacy
+    # ``return AsyncStream directly`` shape still works because
+    # ``isawaitable(AsyncStream)`` is False.
+    if stream:
+        try:
+            result = client.chat.completions.create(**kwargs)
+            import asyncio as _asyncio
+            if _asyncio.iscoroutine(result):
+                # openai>=1.0 SDK shape — must await to get the
+                # AsyncStream. Note: this awaits inside the existing
+                # event loop; cancellation propagates correctly because
+                # the coroutine is created here and not yet running.
+                result = await result
+            return _iter_async_stream(result)
+        except Exception:
+            logger.warning(
+                "Auxiliary %s (async): streaming create() failed",
+                task or "call", exc_info=True)
+            raise
 
     # Convert image blocks for Anthropic-compatible endpoints (e.g. MiniMax)
     if _is_anthropic_compat_endpoint(resolved_provider, _client_base):

@@ -64,6 +64,7 @@ import json
 import logging
 import re
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Sequence, Union
 
 logger = logging.getLogger(__name__)
@@ -100,6 +101,33 @@ class PluginLlmImageInput:
 
 
 PluginLlmInput = Union[PluginLlmTextInput, PluginLlmImageInput, Dict[str, Any]]
+
+
+@dataclass
+class PluginLlmStreamChunk:
+    """One chunk yielded by :meth:`PluginLlm.acomplete_stream`.
+
+    Attributes:
+        delta:   New text produced by this chunk (empty for the final
+                 chunk). Concatenating all ``delta`` values across the
+                 stream reconstructs the full model output.
+        final:   True iff this is the terminal chunk carrying the
+                 parsed value and usage metadata. Yields end the
+                 iteration right after a final chunk.
+        parsed:  The structured output parsed against the ``json_schema``
+                 constraint, if any. Available only on the terminal
+                 chunk; intermediate chunks have ``parsed=None``.
+        text:    The full text the model produced by the terminal chunk
+                 (intermediate chunks have ``text=""``).
+        usage:   :class:`PluginLlmUsage` captured from the final
+                 response, only on the terminal chunk.
+    """
+
+    delta: str = ""
+    final: bool = False
+    parsed: Optional[Dict[str, Any]] = None
+    text: str = ""
+    usage: Any = None
 """A single structured input block.
 
 Plugins may pass either the dataclasses above or plain dicts with the
@@ -442,15 +470,24 @@ def _build_structured_messages(
 
 
 _FENCE_RE = re.compile(r"```(?:json)?\s*(.+?)```", re.DOTALL | re.IGNORECASE)
+# Some models (notably MiniMax-M3 / Claude with extended thinking /
+# DeepSeek-R1) wrap their reasoning in ``...`` blocks. The
+# reasoning precedes the actual structured output. We strip
+# ``...`` blocks so the JSON parser only sees the schema-bound
+# payload — matching what ``_strip_code_fences`` does for ```json```.
+_THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
 
 
 def _strip_code_fences(text: str) -> str:
     """Pull the first fenced code block out of ``text`` if any. Returns
     ``text`` unchanged when no fence is present."""
+    # Strip ``...`` reasoning blocks first (some chat models
+    # always emit them regardless of schema).
+    text = _THINK_RE.sub("", text)
     match = _FENCE_RE.search(text)
-    if match:
-        return match.group(1).strip()
-    return text.strip()
+    if match is None:
+        return text.strip()
+    return match.group(1).strip()
 
 
 def _parse_structured_text(
@@ -591,6 +628,49 @@ def _resolve_attribution(
 
 
 # ---------------------------------------------------------------------------
+# Streaming helpers (real per-token path)
+# ---------------------------------------------------------------------------
+
+
+def _streaming_single_response_chunk(response: Any):
+    """Wrap a non-streaming ChatCompletion response as a single chunk.
+
+    Used when the legacy ``async_caller`` injection returns a single
+    response (not chunks). The streaming seam in :meth:`PluginLlm.acomplete_stream`
+    consumes this chunk uniformly alongside OpenAI
+    ``ChatCompletionChunk``-shaped objects from real streaming.
+    """
+    choices = []
+    for src in getattr(response, "choices", []) or []:
+        # Convert the message into a delta with the same content.
+        msg = getattr(src, "message", None)
+        content = getattr(msg, "content", None) if msg is not None else None
+        delta = SimpleNamespace(
+            content=content,
+            tool_calls=None,
+            reasoning_content=getattr(msg, "reasoning_content", None)
+            if msg is not None else None,
+            reasoning=None,
+        )
+        choices.append(SimpleNamespace(
+            index=getattr(src, "index", 0),
+            delta=delta,
+            finish_reason=getattr(src, "finish_reason", None),
+        ))
+    return SimpleNamespace(
+        choices=choices,
+        model=getattr(response, "model", None),
+        usage=getattr(response, "usage", None),
+    )
+
+
+async def _async_iter(items):
+    """Tiny ``async for`` helper for in-memory chunks."""
+    for it in items:
+        yield it
+
+
+# ---------------------------------------------------------------------------
 # PluginLlm facade
 # ---------------------------------------------------------------------------
 
@@ -611,11 +691,19 @@ class PluginLlm:
         policy_loader: Optional[Callable[[str], _TrustPolicy]] = None,
         sync_caller: Optional[Callable[..., Any]] = None,
         async_caller: Optional[Callable[..., Awaitable[Any]]] = None,
+        async_stream_caller: Optional[Callable[..., Awaitable[Any]]] = None,
     ) -> None:
         self._plugin_id = plugin_id
         self._policy_loader = policy_loader or _resolve_trust_policy
         self._sync_caller = sync_caller
         self._async_caller = async_caller
+        # Streaming seam: when set, ``acomplete_stream`` calls this
+        # instead of the non-streaming ``_invoke_async`` path. Returns
+        # an async iterator over OpenAI ``ChatCompletionChunk``-shaped
+        # objects. The auxiliary client yields real per-token chunks
+        # when stream=True; this injection point lets unit tests stub
+        # a streaming flow without round-tripping to a real provider.
+        self._async_stream_caller = async_stream_caller
 
     # -- public sync API ----------------------------------------------------
 
@@ -861,6 +949,7 @@ class PluginLlm:
             system_prompt=system_prompt,
         )
         extra_body = self._json_response_format(json_mode=json_mode, json_schema=json_schema)
+
         real_provider, real_model, response = await self._invoke_async(
             messages=messages,
             provider_override=eff_provider,
@@ -890,6 +979,163 @@ class PluginLlm:
                 "profile": eff_profile or "",
                 "schema_name": schema_name or "",
             },
+        )
+
+    # -- streaming -----------------------------------------------------------
+
+    async def acomplete_stream(
+        self,
+        *,
+        instructions: str,
+        input: Sequence[PluginLlmInput],
+        json_schema: Optional[Any] = None,
+        json_mode: bool = False,
+        schema_name: Optional[str] = None,
+        system_prompt: Optional[str] = None,
+        provider: Optional[str] = None,
+        model: Optional[str] = None,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+        timeout: Optional[float] = None,
+        agent_id: Optional[str] = None,
+        profile: Optional[str] = None,
+        purpose: Optional[str] = None,
+    ):
+        """Async-iterator sibling of :meth:`acomplete_structured`.
+
+        Yields :class:`PluginLlmStreamChunk` instances. Today the
+        underlying auxiliary client
+        (``agent.auxiliary_client.async_call_llm``) returns a single
+        completed response, so this method issues one call and emits
+        exactly one terminal chunk carrying the parsed value. When the
+        client grows a streaming API, ``_invoke_async_stream`` only
+        needs an upgrade to emit real per-token chunks — the public
+        iter surface here stays stable.
+
+        Yields:
+            PluginLlmStreamChunk — zero or more non-final chunks with
+            ``delta`` populated, then one terminal chunk with
+            ``final=True`` carrying the parsed value and usage metadata.
+        """
+        if not instructions or not instructions.strip():
+            raise ValueError("acomplete_stream requires non-empty instructions")
+        if not input:
+            raise ValueError("acomplete_stream requires at least one input block")
+
+        policy = self._policy_loader(self._plugin_id)
+        eff_provider, eff_model, eff_agent, eff_profile = _check_overrides(
+            policy,
+            requested_provider=provider,
+            requested_model=model,
+            requested_agent_id=agent_id,
+            requested_profile=profile,
+        )
+
+        messages = _build_structured_messages(
+            instructions=instructions,
+            inputs=list(input),
+            json_mode=json_mode,
+            json_schema=json_schema,
+            schema_name=schema_name,
+            system_prompt=system_prompt,
+        )
+        extra_body = self._json_response_format(
+            json_mode=json_mode, json_schema=json_schema,
+        )
+
+        # Streaming seam: when an injected async_stream_caller is
+        # supplied (test), call it. Otherwise round-trip through the
+        # real ``auxiliary_client.async_call_llm(..., stream=True)``
+        # path so the user sees per-token chunks in production.
+        call_kwargs = dict(
+            messages=messages,
+            provider_override=eff_provider,
+            model_override=eff_model,
+            profile_override=eff_profile,
+            temperature=temperature,
+            max_tokens=max_tokens,
+            timeout=timeout,
+            extra_body=extra_body,
+        )
+
+        full_text = ""
+        final_chunk_seen = False
+        usage = None
+
+        def _delta_from_chunk(chunk: Any) -> str:
+            choices = getattr(chunk, "choices", None) or []
+            if not choices:
+                return ""
+            delta = getattr(choices[0], "delta", None)
+            if delta is None:
+                return ""
+            return getattr(delta, "content", None) or ""
+
+        if self._async_stream_caller is not None:
+            stream_iter = await self._async_stream_caller(
+                stream=True, **call_kwargs)
+        elif self._async_caller is not None:
+            # Legacy injection: ``async_caller`` returns a
+            # ``(provider, model, response)`` tuple (back-compat
+            # contract). Preserve that shape by unwrapping the tuple
+            # before wrapping the response as a single-chunk stream.
+            injected = await self._async_caller(**call_kwargs)
+            if isinstance(injected, tuple) and len(injected) == 3:
+                response = injected[2]
+            else:
+                response = injected
+            chunk = _streaming_single_response_chunk(response)
+            stream_iter = _async_iter([chunk])
+        else:
+            from agent.auxiliary_client import async_call_llm
+            stream_iter = await async_call_llm(
+                task=None,
+                provider=eff_provider,
+                model=eff_model,
+                base_url=None,
+                api_key=None,
+                main_runtime=None,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                tools=None,
+                timeout=timeout,
+                extra_body=extra_body,
+                stream=True,
+            )
+
+        async for chunk in stream_iter:
+            delta = _delta_from_chunk(chunk)
+            if delta:
+                full_text += delta
+                yield PluginLlmStreamChunk(
+                    delta=delta,
+                    final=False,
+                )
+            usage = getattr(chunk, "usage", None) or usage
+            # OpenAI emits a final usage-only chunk with empty
+            # choices and a usage payload.
+            fr = (getattr(getattr(chunk, "choices", [None])[0] or None,
+                          "finish_reason", None)
+                  if getattr(chunk, "choices", None)
+                  else None)
+            if fr is not None:
+                final_chunk_seen = True
+            if (not getattr(chunk, "choices", None)) and usage:
+                # usage-only chunk — terminal.
+                break
+
+        # Parse the streamed text with the same helpers as the
+        # non-streaming path so consumers see equivalent parsed value.
+        parsed, _ = _parse_structured_text(
+            text=full_text, json_mode=json_mode, json_schema=json_schema,
+        )
+        yield PluginLlmStreamChunk(
+            delta="",
+            final=True,
+            parsed=parsed,
+            text=full_text,
+            usage=usage,
         )
 
     # -- internals ---------------------------------------------------------
@@ -1019,6 +1265,7 @@ def make_plugin_llm_for_test(
     policy: _TrustPolicy,
     sync_caller: Optional[Callable[..., Any]] = None,
     async_caller: Optional[Callable[..., Awaitable[Any]]] = None,
+    async_stream_caller: Optional[Callable[..., Awaitable[Any]]] = None,
 ) -> PluginLlm:
     """Construct a :class:`PluginLlm` with an injected policy and caller.
 
@@ -1030,6 +1277,7 @@ def make_plugin_llm_for_test(
         policy_loader=lambda _pid: policy,
         sync_caller=sync_caller,
         async_caller=async_caller,
+        async_stream_caller=async_stream_caller,
     )
 
 
@@ -1041,6 +1289,8 @@ __all__ = [
     "PluginLlmUsage",
     "PluginLlmCompleteResult",
     "PluginLlmStructuredResult",
+    "PluginLlmStreamChunk",
     "PluginLlmTrustError",
     "make_plugin_llm_for_test",
 ]
+

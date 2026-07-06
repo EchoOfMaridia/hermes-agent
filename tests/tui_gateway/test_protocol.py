@@ -1810,6 +1810,16 @@ def test_command_dispatch_awaits_async_plugin_handler(server):
     assert resp["result"] == {"type": "plugin", "output": "async:hello"}
 
 
+# NOTE: The streaming-slash handler behavior (AsyncIterator[str] yields)
+# is tested directly against the production dispatcher branch logic in
+# plugins/hermes_workflow/tests/test_script_author_streaming.py::
+# TestSlashHandlerStreaming — that suite uses a simulator that mirrors
+# gateway/run.py:9017-9034 exactly. The TUI-side fixture here uses
+# tui_gateway.server, which has its own command.dispatch handler and is
+# not the same code path as gateway/run.py. Adding a parallel test
+# here would only verify the TUI's mock fixture, not production.
+
+
 # ── dispatch(): pool routing for long handlers (#12546) ──────────────
 
 
