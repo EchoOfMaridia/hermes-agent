@@ -271,19 +271,44 @@ class StubBridge(AgentBridge):
 def build_bridge_from_env() -> AgentBridge | None:
     """Read HERMES_WORKFLOW_AGENT_BRIDGE and return the matching bridge.
 
-    Returns None if the env var is unset (preserving v0.1.0 behaviour).
+    Default (env var unset OR unrecognized value) returns ``StubBridge``
+    so that ``ctx.runtime.ask_agent()`` calls succeed with a deterministic
+    stub response instead of raising ``NotImplementedError``.
+
+    This is the safe default: a workflow that calls an agent will
+    complete end-to-end (with stub verdicts) even when no LLM bridge is
+    configured, rather than crashing the run. To get LIVE LLM verdicts,
+    set ``HERMES_WORKFLOW_AGENT_BRIDGE=hermes-chat`` (subprocess bridge
+    to ``hermes chat -q ...``).
 
     Accepted values:
-        "hermes-chat"   → HermesChatBridge
-        "stub"          → StubBridge
-        "" / unset      → None
-        anything else   → None (unknown value, default to no bridge)
+        unset / ""        → ``StubBridge()`` (deterministic, no network,
+                             no LLM cost, default since 2026-07-08 fix)
+        "stub"            → ``StubBridge()`` (explicit form of the above)
+        "hermes-chat"     → ``HermesChatBridge()`` (subprocess to ``hermes chat``)
+        "hermes_chat"     → alias for "hermes-chat"
+        "chat"            → alias for "hermes-chat"
+        anything else     → ``StubBridge()`` (unknown value, fall back
+                             safely rather than break the run)
     """
+    import os
     choice = os.environ.get("HERMES_WORKFLOW_AGENT_BRIDGE", "").strip().lower()
-    if not choice:
-        return None
-    if choice in ("hermes-chat", "hermes_chat", "chat"):
-        return HermesChatBridge()
-    if choice == "stub":
+    if choice in ("", "stub"):
         return StubBridge()
-    return None
+    if choice in ("hermes-chat", "hermes_chat", "chat"):
+        try:
+            return HermesChatBridge()
+        except RuntimeError:
+            # The hermes binary is not on PATH; do NOT silently fall
+            # back to a stub (operator explicitly asked for chat and
+            # should see the failure). Re-raise.
+            raise
+    # Unknown value: log + fall back to stub rather than break the run.
+    import logging
+    logging.getLogger(__name__).warning(
+        "build_bridge_from_env: unrecognized HERMES_WORKFLOW_AGENT_BRIDGE=%r; "
+        "falling back to StubBridge. Recognized values: '', 'stub', "
+        "'hermes-chat' (or 'hermes_chat'/'chat').",
+        choice,
+    )
+    return StubBridge()
