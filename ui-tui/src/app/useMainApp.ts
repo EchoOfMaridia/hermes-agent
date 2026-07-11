@@ -450,10 +450,11 @@ export function useMainApp(gw: GatewayClient) {
   const rpc: GatewayRpc = useCallback(
     async <T extends Record<string, any> = Record<string, any>>(
       method: string,
-      params: Record<string, unknown> = {}
+      params: Record<string, unknown> = {},
+      timeoutMs?: number
     ) => {
       try {
-        const result = asRpcResult<T>(await gw.request<T>(method, params))
+        const result = asRpcResult<T>(await gw.request<T>(method, params, timeoutMs))
 
         if (result) {
           return result

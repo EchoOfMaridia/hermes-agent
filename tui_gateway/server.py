@@ -146,6 +146,30 @@ except (ValueError, TypeError):
     _slash_timeout = 45.0
 _SLASH_WORKER_TIMEOUT_S = max(5.0, _slash_timeout)
 
+# Server-side ceiling for the manual ``session.compress`` RPC. The aux LLM
+# call inside ``agent._compress_context`` can hang silently on a wedged
+# provider / network partition; without this watchdog the dispatcher pool
+# worker spins forever, the front-end times out at its 30s default and
+# reports ``compression failed: request timed out: session.compress`` —
+# and the actual progress is lost. Pair with the desktop
+# ``SESSION_COMPRESS_REQUEST_TIMEOUT_MS`` (apps/desktop/src/hermes.ts) so
+# any long-but-eventually-successful compress wins, and a stuck compress
+# errors out within this window instead of invisibly consuming a pool
+# worker. Default 8 minutes matches the desktop constant; a wedged RPC
+# becomes visible to the user well within a coffee break. Override only
+# via HERMES_TUI_COMPRESS_WATCHDOG_S for edge environments — the floor
+# at 30s is the safety net that prevents an operator from turning the
+# watchdog into a fast-fail that hides the 30s front-end timeout (the
+# very problem this code exists to solve).
+try:
+    _SESSION_COMPRESS_WATCHDOG_S = float(
+        os.environ.get("HERMES_TUI_COMPRESS_WATCHDOG_S") or str(8 * 60)
+    )
+except (ValueError, TypeError):
+    _SESSION_COMPRESS_WATCHDOG_S = 8 * 60.0
+if _SESSION_COMPRESS_WATCHDOG_S < 30:
+    _SESSION_COMPRESS_WATCHDOG_S = 30.0
+
 # When a WebSocket client (the dashboard's embedded-chat tab / desktop app)
 # disconnects, ``tui_gateway.ws`` detaches the transport but intentionally
 # leaves the session parked so a quick reconnect can reattach it (see ws.py).
@@ -7938,13 +7962,44 @@ def _(rid, params: dict) -> dict:
             )
 
         try:
-            removed, usage = _compress_session_history(
+            # Run the actual LLM-bound compression on a separate worker so a
+            # wedged aux call (network partition, provider hang) can be capped
+            # by ``_SESSION_COMPRESS_WATCHDOG_S`` without blocking the read
+            # loop or tying up the pool forever. The watchdog is the
+            # server-side half of the ``SESSION_COMPRESS_REQUEST_TIMEOUT_MS``
+            # contract in apps/desktop/src/hermes.ts — if the aux LLM call
+            # returns within the ceiling, a long-but-eventual success is
+            # delivered to the user; if it wedges, the RPC returns code 5041
+            # so the user gets an actionable error instead of an invisible
+            # pool-worker stall (the bug fixed here).
+            compress_future = _pool.submit(
+                _compress_session_history,
                 session,
                 focus_topic,
                 approx_tokens=before_tokens,
                 before_messages=before_messages,
                 history_version=history_version,
             )
+            try:
+                removed, usage = compress_future.result(
+                    timeout=_SESSION_COMPRESS_WATCHDOG_S
+                )
+            except concurrent.futures.TimeoutError:
+                # The pool worker is still running; we can't synchronously
+                # kill it, but we CAN stop holding up the front-end. Cancel
+                # raises on already-running futures — that's fine; the worker
+                # will exit on its next checkpoint (the long block is the
+                # LLM HTTP call, which socket timeouts will eventually clean
+                # up server-side).
+                compress_future.cancel()
+                return _err(
+                    rid,
+                    5041,
+                    f"compress did not finish within "
+                    f"{int(_SESSION_COMPRESS_WATCHDOG_S)}s — the underlying "
+                    f"auxiliary model may be unavailable. Try again or use "
+                    f"/new to start a fresh session.",
+                )
             with session["history_lock"]:
                 messages = list(session.get("history", []))
             after_count = len(messages)

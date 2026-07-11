@@ -157,7 +157,10 @@
       "@parcel/watcher",
       "better-sqlite3",
       "esbuild"
-    ]
+    ],
+    "overrides": {
+      "@assistant-ui/store": "0.2.13"
+    }
   },
   "build": {
     "electronVersion": "40.10.2",

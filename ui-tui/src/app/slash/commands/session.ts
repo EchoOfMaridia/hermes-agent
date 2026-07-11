@@ -186,13 +186,31 @@ export const sessionCommands: SlashCommand[] = [
     help: 'compress transcript',
     name: 'compress',
     run: (arg, ctx) => {
+      // /compress runs an auxiliary LLM call inside the gateway and on
+      // real-world histories the call routinely takes 30-180 seconds —
+      // well past the gateway client's 120s default. Forward a per-call
+      // ceiling matching the desktop surface (8 minutes, see
+      // apps/desktop/src/hermes.ts::SESSION_COMPRESS_REQUEST_TIMEOUT_MS)
+      // and the server-side watchdog
+      // tui_gateway/server.py::_SESSION_COMPRESS_WATCHDOG_S so a wedged
+      // aux LLM call can't strand the dispatcher pool worker.
+      const compressTimeoutMs = 8 * 60 * 1000
+
       ctx.gateway
-        .rpc<SessionCompressResponse>('session.compress', {
-          session_id: ctx.sid,
-          ...(arg ? { focus_topic: arg } : {})
-        })
+        .rpc<SessionCompressResponse>(
+          'session.compress',
+          {
+            session_id: ctx.sid,
+            ...(arg ? { focus_topic: arg } : {})
+          },
+          compressTimeoutMs
+        )
         .then(
           ctx.guarded<SessionCompressResponse>(r => {
+            if (!r) {
+              return
+            }
+
             if (Array.isArray(r.messages)) {
               const rows = toTranscriptMessages(r.messages)
 

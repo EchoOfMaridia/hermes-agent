@@ -72,7 +72,11 @@ export interface CompletionItem {
 }
 
 export interface GatewayRpc {
-  <T extends RpcResult = RpcResult>(method: string, params?: Record<string, unknown>): Promise<null | T>
+  <T extends RpcResult = RpcResult>(
+    method: string,
+    params?: Record<string, unknown>,
+    timeoutMs?: number
+  ): Promise<null | T>
 }
 
 export interface GatewayServices {

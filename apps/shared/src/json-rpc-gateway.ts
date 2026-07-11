@@ -60,6 +60,33 @@ export interface GatewayClientOptions {
 }
 
 const ANY = '*'
+// Per-method timeout ceiling overrides. The shared gateway client used
+// to apply a flat ``DEFAULT_REQUEST_TIMEOUT_MS = 120_000`` to EVERY
+// call, regardless of which RPC the call was for. That default is
+// wrong for any long-running RPC (session.compress wraps an auxiliary
+// LLM call, prompt.submit spans an entire turn, session.resume reads
+// + rehydrates the entire history); the default trips before the RPC
+// can return, and the user sees an opaque ``request timed out:
+// <method>`` on the first call. The desktop layer accidentally doubled
+// down on this by configuring ``HermesGateway`` with a 30s default —
+// so even with the call-site timeout override, the desktop's global
+// default would still win for any UNOVERRIDDEN call.
+//
+// The fix is per-method: any unknown method falls back to the global
+// default, but compress / prompt.submit / session.resume get the
+// correct ceiling automatically. Call-site ``timeoutMs`` overrides
+// STILL win — this map is the floor, not the ceiling. Adding a new
+// long-tail RPC here is a one-line change rather than hunting every
+// call site. Mirrors the gateway's own _LONG_HANDLERS set
+// (tui_gateway/server.py:~205) so the front-end and the server agree
+// on which methods are long.
+const LONG_METHOD_TIMEOUT_MS: Readonly<Record<string, number>> = {
+  'session.compress': 8 * 60 * 1000,
+  'prompt.submit': 30 * 60 * 1000,
+  'session.resume': 5 * 60 * 1000,
+  'session.branch': 30 * 1000
+}
+
 const DEFAULT_REQUEST_TIMEOUT_MS = 120_000
 // A reconnect after sleep/wake must not hang forever in 'connecting' (which
 // keeps the composer disabled and stuck on "Starting Hermes..."). If the open
@@ -232,9 +259,31 @@ export class JsonRpcGatewayClient {
   request<T>(
     method: string,
     params: Record<string, unknown> = {},
-    timeoutMs = this.options.requestTimeoutMs,
+    timeoutMs?: number,
     signal?: AbortSignal
   ): Promise<T> {
+    // Per-method ceiling: callers that DON'T pass a timeoutMs (the
+    // long-running slash commands in particular) still get a sane
+    // ceiling automatically — fall back to the connection-level
+    // default only when the per-method map doesn't have this RPC.
+    // Callers that DO pass a timeoutMs preserve their override (the
+    // Optional<number> argument pattern). This turns the timeout
+    // from a known footgun (every unreachable /compress surfaced as
+    // ``request timed out: session.compress``) into a non-issue for
+    // any RPC the gateway actually runs.
+    if (timeoutMs === undefined) {
+      const perMethod = LONG_METHOD_TIMEOUT_MS[method]
+      if (perMethod !== undefined) {
+        // Per-method ceiling is a FLOOR, never a CAP. The connection-level
+        // ``requestTimeoutMs`` may itself be longer than the per-method
+        // default for this RPC — preserve whichever is larger, so an
+        // operator who has deliberately bumped the global default for
+        // a slow network doesn't get the floor applied under them.
+        timeoutMs = Math.max(perMethod, this.options.requestTimeoutMs)
+      } else {
+        timeoutMs = this.options.requestTimeoutMs
+      }
+    }
     const socket = this.socket
 
     if (!socket || socket.readyState !== WebSocket.OPEN) {

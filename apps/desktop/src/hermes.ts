@@ -69,8 +69,35 @@ import type {
 // global default: interactive/runtime calls and the liveness poll (/api/status)
 // keep the short default so a genuinely-dead backend is still detected fast.
 export const STARTUP_REQUEST_TIMEOUT_MS = 60_000
-const DEFAULT_GATEWAY_REQUEST_TIMEOUT_MS = 30_000
+// Generic RPC ceiling. Bumped from 30s to 5 minutes so any UNOVERRIDDEN
+// RPC survives a slow LLM call / slow network round trip. The
+// per-method map in apps/shared/src/json-rpc-gateway.ts::LONG_METHOD_TIMEOUT_MS
+// already lifts this for the long-tail RPCs (compress, prompt.submit,
+// resume, branch). 30s was the original bug: every call that wasn't
+// explicitly per-method-overridden tripped the front-end timer before
+// the gateway could answer, surfacing as ``request timed out:
+// <method>``. The new value is wide enough that an operator who
+// hasn't put a per-call override in place still gets a usable
+// error message instead of a silent timeout.
+const DEFAULT_GATEWAY_REQUEST_TIMEOUT_MS = 5 * 60_000
 const SESSION_LIST_REQUEST_TIMEOUT_MS = 60_000
+// /compress legitimately runs an auxiliary LLM call to summarise the
+// surviving tail of the conversation, and on real-world history loads
+// that can stretch to several minutes — far longer than the 30s default
+// `HermesGateway` request timeout. Without an explicit per-call override
+// the front-end gateway client (apps/shared/src/json-rpc-gateway.ts:61)
+// interprets the still-in-flight compress as a timeout and the user sees
+// `compression failed: request timed out: session.compress` even though
+// the gateway is making progress. Pair this constant with a server-side
+// watchdog in tui_gateway/server.py (`_SESSION_COMPRESS_WATCHDOG_S`) so
+// a wedged aux LLM doesn't tie up the dispatcher pool worker beyond
+// this ceiling — DO NOT raise this value past ~30 minutes, or a wedged
+// RPC becomes invisible to the user instead of erroring out. The
+// test/test_session_compress_watchdog.py regression pins both sides.
+// 8 minutes is enough headroom for the longest realistic compress while
+// keeping the user-visible failure window inside a normal coffee-break
+// mental model.
+export const SESSION_COMPRESS_REQUEST_TIMEOUT_MS = 8 * 60_000
 // prompt.submit is effectively fire-and-forget: turn completion is signaled by
 // stream / message.complete events, NOT by the RPC return. A long turn (MoA
 // presets running references + aggregator in series, deep reasoning, large tool

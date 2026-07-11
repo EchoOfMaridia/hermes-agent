@@ -2,7 +2,7 @@ import type { AppendMessage, ThreadMessage } from '@assistant-ui/react'
 import { useStore } from '@nanostores/react'
 import { type MutableRefObject, useCallback, useEffect, useRef } from 'react'
 
-import { getProfiles, transcribeAudio } from '@/hermes'
+import { SESSION_COMPRESS_REQUEST_TIMEOUT_MS, getProfiles, transcribeAudio } from '@/hermes'
 import { translateNow, type Translations, useI18n } from '@/i18n'
 import { stripAnsi } from '@/lib/ansi'
 import { branchGroupForUser, type ChatMessage, chatMessageText, textPart } from '@/lib/chat-messages'
@@ -84,6 +84,39 @@ interface HandoffResult {
 
 function delay(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms))
+}
+
+// Match the gateway's "request timed out" error string OR the server-side
+// watchdog code we set in tui_gateway/server.py. Without the explicit
+// shape match we'd translate every error from /compress into a timeout
+// hint, hiding real failures (auth, busy session, etc). The two shapes
+// we want to recognise:
+//
+//   "request timed out: session.compress"
+//   "compress did not finish within 480s ..."
+//
+// Both come from timeouts the user actually hit; everything else stays
+// as a literal ``compression failed: <message>`` line.
+function isCompressTimeoutError(message: string): boolean {
+  return /request timed out: *session\.compress/.test(message) ||
+    /compress did not finish within \d+s/.test(message)
+}
+
+function compressTimeoutHint(rawMessage: string): string {
+  const seconds = /within (\d+)s/.exec(rawMessage)?.[1]
+  // The server-side watchdog value SESSION_COMPRESS_WATCHDOG_S and
+  // the front-end SESSION_COMPRESS_REQUEST_TIMEOUT_MS differ — both
+  // can fire. Round to whole minutes in the hint; the user just
+  // needs enough context to decide between retry-vs-/new.
+  const ceiling = seconds ? Math.max(1, Math.round(Number(seconds) / 60)) : 8
+  const minuteLabel = ceiling === 1 ? 'minute' : 'minutes'
+  return [
+    `compression timed out after ${ceiling} ${minuteLabel}`,
+    'The auxiliary model call has not returned. Try one of:',
+    '  - /compress again -- transient network blip on the provider side.',
+    '  - /new -- start a fresh session if the provider is fully down.',
+    '  - Check the ``compress.auxiliary_model`` setting in config.yaml.'
+  ].join('\n  ')
 }
 
 function isSessionIdCandidate(value: string): boolean {
@@ -320,7 +353,20 @@ interface PromptActionsOptions {
   createBackendSessionForSend: (preview?: string | null) => Promise<string | null>
   handleSkinCommand: (arg: string) => string
   refreshSessions: () => Promise<void>
-  requestGateway: <T>(method: string, params?: Record<string, unknown>) => Promise<T>
+  // ``timeoutMs`` overrides the gateway client's 30s default for slow
+  // server-side RPCs. /compress uses this to override the
+  // ``SESSION_COMPRESS_REQUEST_TIMEOUT_MS`` ceiling (defined in @/hermes)
+  // so a long but productive compress doesn't trip the front-end's
+  // default request timeout. Hermes gateway's ``gateway.request``
+  // already accepts the third argument — the prop signature was
+  // narrowed to (method, params?) by mistake. See
+  // ``apps/shared/src/json-rpc-gateway.ts:230`` for the underlying
+  // signature.
+  requestGateway: <T>(
+    method: string,
+    params?: Record<string, unknown>,
+    timeoutMs?: number
+  ) => Promise<T>
   resumeStoredSession: (storedSessionId: string) => Promise<void> | void
   selectedStoredSessionIdRef: MutableRefObject<string | null>
   startFreshSessionDraft: () => void
@@ -1392,10 +1438,24 @@ export function usePromptActions({
           renderSlashOutput(copy.compressRunning)
 
           try {
-            const result = await requestGateway<SessionCompressResponse>('session.compress', {
-              session_id: sessionId,
-              focus_topic: focusTopic
-            })
+            // /compress is one of the long-tail RPCs: the gateway runs
+            // agent._compress_context (an auxiliary LLM call) and the
+            // result can take well past the gateway client's 30s
+            // default request timeout. Forward a per-call timeout
+            // override so a slow-but-eventual success reaches the user
+            // instead of the front-end interpreting it as a hang.
+            // Pinned to SESSION_COMPRESS_REQUEST_TIMEOUT_MS in @/hermes
+            // (8 minutes by default) and bounded server-side by
+            // tui_gateway/server.py::_SESSION_COMPRESS_WATCHDOG_S so a
+            // wedged aux call can't invisibly consume a pool worker.
+            const result = await requestGateway<SessionCompressResponse>(
+              'session.compress',
+              {
+                session_id: sessionId,
+                focus_topic: focusTopic
+              },
+              SESSION_COMPRESS_REQUEST_TIMEOUT_MS
+            )
 
             const summary = result?.summary
             const headline = summary?.headline?.trim()
@@ -1430,9 +1490,25 @@ export function usePromptActions({
 
             renderSlashOutput('nothing to compress')
           } catch (err) {
-            renderSlashOutput(
-              `compression failed: ${err instanceof Error ? err.message : String(err)}`
-            )
+            // Translate the front-end "request timed out: <method>" shape
+            // (emitted by apps/shared/src/json-rpc-gateway.ts:271 when the
+            // per-call timeout fires) into a friendlier hint. Otherwise
+            // we pass the raw error through and the user sees the
+            // confusing ``compression failed: request timed out:
+            // session.compress`` blob — which looks like the gateway
+            // broke, when in reality a slow-but-eventual compress is
+            // still in flight or the server hit its watchdog.
+            const rawMessage = err instanceof Error ? err.message : String(err)
+            const friendlyHint = isCompressTimeoutError(rawMessage)
+              ? compressTimeoutHint(rawMessage)
+              : null
+
+            if (friendlyHint) {
+              renderSlashOutput(friendlyHint)
+              return
+            }
+
+            renderSlashOutput(`compression failed: ${rawMessage}`)
           }
         },
         // /reasoning inspects or sets the per-session reasoning effort. Bare

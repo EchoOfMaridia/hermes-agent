@@ -689,12 +689,17 @@ export class GatewayClient extends EventEmitter {
     return this.ws
   }
 
-  private requestOverWebSocket<T = unknown>(method: string, params: Record<string, unknown> = {}): Promise<T> {
+  private requestOverWebSocket<T = unknown>(
+    method: string,
+    params: Record<string, unknown> = {},
+    timeoutMs?: number
+  ): Promise<T> {
     return this.ensureAttachedWebSocket(method).then(
       ws =>
         new Promise<T>((resolve, reject) => {
           const id = `r${++this.reqId}`
-          const timeout = setTimeout(this.onTimeout, REQUEST_TIMEOUT_MS, id)
+          const perCallTimeoutMs = timeoutMs ?? REQUEST_TIMEOUT_MS
+          const timeout = setTimeout(this.onTimeout, perCallTimeoutMs, id)
 
           timeout.unref?.()
           this.pending.set(id, {
@@ -721,7 +726,11 @@ export class GatewayClient extends EventEmitter {
     )
   }
 
-  request<T = unknown>(method: string, params: Record<string, unknown> = {}): Promise<T> {
+  request<T = unknown>(
+    method: string,
+    params: Record<string, unknown> = {},
+    timeoutMs?: number
+  ): Promise<T> {
     const attachUrl = resolveGatewayAttachUrl()
 
     if (attachUrl) {
@@ -734,7 +743,7 @@ export class GatewayClient extends EventEmitter {
         this.start()
       }
 
-      return this.requestOverWebSocket<T>(method, params)
+      return this.requestOverWebSocket<T>(method, params, timeoutMs)
     }
 
     if (!this.proc?.stdin || this.proc.killed || this.proc.exitCode !== null) {
@@ -746,9 +755,10 @@ export class GatewayClient extends EventEmitter {
     }
 
     const id = `r${++this.reqId}`
+    const perCallTimeoutMs = timeoutMs ?? REQUEST_TIMEOUT_MS
 
     return new Promise<T>((resolve, reject) => {
-      const timeout = setTimeout(this.onTimeout, REQUEST_TIMEOUT_MS, id)
+      const timeout = setTimeout(this.onTimeout, perCallTimeoutMs, id)
 
       timeout.unref?.()
 
