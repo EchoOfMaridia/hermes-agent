@@ -7,8 +7,11 @@
 //   dist/electron-main.mjs    (MJS bundle — entry point for packaged app)
 //   dist/electron-preload.js (CJS bundle — loaded via BrowserWindow preload)
 //
-// `electron` and `node-pty` are external (provided by the runtime / staged
-// separately via stage-native-deps).
+// `electron`, `node-pty`, and `simple-git` are external (provided by the
+// runtime / staged separately via stage-native-deps). Without the simple-git
+// entry, esbuild errors with a stale "Yarn Plug'n'Play manifest" complaint
+// because the package is hoisted to the workspace root, not under this
+// app's local node_modules.
 import { build } from 'esbuild'
 import { resolve, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -24,7 +27,7 @@ const mainOut = resolve(distDir, 'electron-main.mjs')
 const preloadEntry = resolve(root, 'electron/preload.ts')
 const preloadOut = resolve(distDir, 'electron-preload.js')
 
-const external = ['electron', 'node-pty', 'fs']
+const external = ['electron', 'node-pty', 'simple-git', 'fs']
 // Production bundles bake packaged=true so unpackaged `electron .` still
 // behaves like a packaged build. Dev bundles (`--dev`) leave the env alone
 // so HERMES_DESKTOP_DEV_SERVER / source-tree resolution keep working.
