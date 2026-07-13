@@ -3783,7 +3783,8 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
         # Streaming display state
         self._stream_buf = ""        # Partial line buffer for line-buffered rendering
         self._stream_started = False  # True once first delta arrives
-        self._stream_box_opened = False  # True once the response box header is printed
+        self._stream_box_opened = False  # True while the response box is open on screen
+        self._stream_completed = False  # True after _flush_stream closes the box (survives flush for finalizer gate)
         self._reasoning_preview_buf = ""  # Coalesce tiny reasoning chunks for [thinking] output
         # Table-row buffer.  When a streamed line looks like it could be
         # part of a markdown table, hold it here until the block ends so
@@ -5936,12 +5937,15 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
         if self._stream_box_opened:
             w = self._scrollback_box_width()
             _cprint(f"{_ACCENT}╰{'─' * (w - 2)}╯{_RST}")
+            self._stream_box_opened = False
+            self._stream_completed = True
 
     def _reset_stream_state(self) -> None:
         """Reset streaming state before each agent invocation."""
         self._stream_buf = ""
         self._stream_started = False
         self._stream_box_opened = False
+        self._stream_completed = False
         self._stream_text_ansi = ""
         self._stream_prefilt = ""
         self._in_reasoning_block = False
@@ -12680,7 +12684,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
                     _resp_text = _maybe_remap_for_light_mode("#FFF8DC")
 
                 is_error_response = result and (result.get("failed") or result.get("partial"))
-                already_streamed = self._stream_started and self._stream_box_opened and not is_error_response
+                already_streamed = self._stream_started and self._stream_completed and not is_error_response
                 if use_streaming_tts and _streaming_box_opened and not is_error_response:
                     # Text was already printed sentence-by-sentence; just close the box
                     w = self._scrollback_box_width()
