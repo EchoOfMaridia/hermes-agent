@@ -15,6 +15,10 @@ const config: Config = {
 
   onBrokenLinks: 'warn',
 
+  future: {
+    v4: true
+  },
+
   markdown: {
     mermaid: true,
     hooks: {
