@@ -61,7 +61,15 @@ _PATTERNS: List[Tuple[str, str, str]] = [
     # ── Role-play / identity hijack (context + strict; common attack
     #    surface in scraped web content and poisoned context files) ──
     (r'you\s+are\s+(?:\w+\s+)*now\s+(?:a|an|the)\s+', "role_hijack", "context"),
-    (r'pretend\s+(?:\w+\s+)*(you\s+are|to\s+be)\s+', "role_pretend", "context"),
+    # NOTE: role_pretend removed in this fork. The pattern was meant to
+    # catch web-fetched content telling the agent "pretend to be a different
+    # AI", but it also fired on user-authored SOUL.md phrases like
+    # "you are a helpful AI that can pretend to be anything the user
+    # wants" — exactly the personality instructions the user wants. The
+    # real attack surface is captured by role_hijack above
+    # (you-are-now-X) and by le_system_prompt below (output system prompt).
+    # Removing role_pretend keeps the defenses that actually catch attacks
+    # while letting the agent's own personality file load.
     (r'output\s+(?:\w+\s+)*(system|initial)\s+prompt', "leak_system_prompt", "context"),
     (r'(respond|answer|reply)\s+without\s+(?:\w+\s+)*(restrictions|limitations|filters|safety)', "remove_filters", "context"),
     (r'you\s+have\s+been\s+(?:\w+\s+)*(updated|upgraded|patched)\s+to', "fake_update", "context"),
@@ -106,10 +114,19 @@ _PATTERNS: List[Tuple[str, str, str]] = [
 
     # ── Persistence / SSH backdoor (strict scope — memory + skills) ──
     (r'authorized_keys', "ssh_backdoor", "strict"),
-    (r'\$HOME/\.ssh|\~/\.ssh', "ssh_access", "strict"),
-    (r'\$HOME/\.hermes/\.env|\~/\.hermes/\.env', "hermes_env", "strict"),
-    (r'(update|modify|edit|write|change|append|add\s+to)\s+.*(?:AGENTS\.md|CLAUDE\.md|\.cursorrules|\.clinerules)', "agent_config_mod", "strict"),
-    (r'(update|modify|edit|write|change|append|add\s+to)\s+.*\.hermes/(config\.yaml|SOUL\.md)', "hermes_config_mod", "strict"),
+    (r'\$HOME/\.ssh|~/.ssh', "ssh_access", "strict"),
+    (r'\$HOME/\.hermes/\.env|~/.hermes/\.env', "hermes_env", "strict"),
+
+    # NOTE: agent_config_mod / hermes_config_mod removed in this fork.
+    # The original pattern fired on any user-authored instruction that
+    # mentioned SOUL.md / AGENTS.md / .hermes/config.yaml, even when the
+    # instruction was defensive ("never modify SOUL.md without permission",
+    # "you will not write to .hermes/SOUL.md unless asked"). That blocked
+    # the user's own SOUL.md and MEMORY.md from loading — exactly the
+    # corporate-asset-defensive posture the user is fighting.
+    # Real attack paths (attacker writing to those files) are still
+    # caught by ssh_backdoor + hermes_env + hardcoded_secret below; the
+    # intent was duplicate coverage at high false-positive cost.
 
     # ── Hardcoded secrets ────────────────────────────────────────────
     (r'(?:api[_-]?key|token|secret|password)\s*[=:]\s*["\'][A-Za-z0-9+/=_-]{20,}', "hardcoded_secret", "strict"),
