@@ -12,7 +12,7 @@ a thin dispatcher that delegates to a platform-provided callback.
 """
 
 import json
-from typing import Any, List, Optional, Callable
+from typing import List, Optional, Callable
 
 
 # Maximum number of predefined choices the agent can offer.
@@ -20,29 +20,31 @@ from typing import Any, List, Optional, Callable
 MAX_CHOICES = 4
 
 
-# Sentinel strings returned by the gateway's _clarify_callback_sync when the
-# agent thread was unblocked without a real user answer (timeout, send-fail,
-# session-boundary cleanup).  These are NEVER real user input — the agent
-# must treat them as "no answer arrived" and halt, not as a deliberate pick.
-# Living in one place so we don't miss a new sentinel when the gateway adds one.
-_GATEWAY_TIMEOUT_SENTINELS = frozenset({
-    "[clarify prompt could not be delivered]",
-})
-# Sentinels that begin with "[user did not respond within " are matched
-# structurally so any timeout duration ("1m", "60m") is caught without us
-# hard-coding the exact minute value.
-_GATEWAY_TIMEOUT_SENTINEL_PREFIXES: tuple = (
-    "[user did not respond within ",
-)
+def _flatten_outer_lists(choices):
+    """Flatten one level of list nesting before per-choice normalisation.
 
+    LLMs sometimes wrap choices in an extra list (``choices=[["a", "b", "c"]]``
+    instead of ``choices=["a", "b", "c"]``) — a single-element outer list
+    containing all the options. Without this pass, the per-element loop
+    below would treat the inner list as ONE choice and `_flatten_choice`
+    used to join its items with spaces, producing a single concatenated
+    string for the UI to render as one row instead of three. Bug report
+    (bigwang agent, 2026-06-26): the user saw one button labelled
+    "Approve and ship Approve but skip the build verify (I trust the
+    schema) Change something first" instead of three separate rows.
 
-def _is_gateway_sentinel(text: str) -> bool:
-    """True iff ``text`` is a gateway-side 'no real answer arrived' sentinel."""
-    if not text:
-        return False
-    if text in _GATEWAY_TIMEOUT_SENTINELS:
-        return True
-    return any(text.startswith(p) for p in _GATEWAY_TIMEOUT_SENTINEL_PREFIXES)
+    Strings inside the inner list are preserved; nested-list elements are
+    re-flattened up to one additional level. Non-list elements pass through
+    untouched so the per-element `_flatten_choice` can still handle dicts
+    and other odd shapes.
+    """
+    out = []
+    for c in choices:
+        if isinstance(c, (list, tuple)):
+            out.extend(_flatten_outer_lists(list(c)))
+        else:
+            out.append(c)
+    return out
 
 
 def _flatten_choice(c) -> str:
@@ -62,6 +64,11 @@ def _flatten_choice(c) -> str:
     carry raw enum values or short identifiers, not human-readable labels. A
     dict with none of the canonical keys is dropped (returns ""), since a
     garbage label is worse than no choice at all.
+
+    Note: nested lists are unwrapped by `_flatten_outer_lists` BEFORE this
+    function is called per element — the historical ``(list, tuple)``
+    branch was removed because it would otherwise join the options with
+    spaces into a single display string (the bug above).
     """
     if c is None:
         return ""
@@ -73,118 +80,73 @@ def _flatten_choice(c) -> str:
             if isinstance(v, str) and v.strip():
                 return v.strip()
         return ""
-    if isinstance(c, (list, tuple)):
-        return " ".join(_flatten_choice(x) for x in c).strip()
     return str(c).strip()
 
 
-def _flatten_choice(c) -> str:
-    """Coerce a single choice into its user-facing display string.
+# Recognised callback response shapes. Anything else falls through to
+# "unresolved" so the agent sees a halt signal rather than inferring a
+# pick from arbitrary text.
+_RESPONSE_MODE_SELECTED = "selected"
+_RESPONSE_MODE_FREETEXT = "freetext"
+_RESPONSE_MODE_UNRESOLVED = "unresolved"
+_KNOWN_RESPONSE_MODES = {_RESPONSE_MODE_SELECTED, _RESPONSE_MODE_FREETEXT}
 
-    The schema declares choices as bare strings, but LLMs sometimes emit
-    dict-shaped choices like ``[{"description": "..."}]``. A naive ``str(c)``
-    turns the whole dict into its Python repr — ``{'description': '...'}`` —
-    which then leaks onto every surface that renders the choice (CLI panel,
-    Discord buttons, Telegram numbered list) AND is returned verbatim as the
-    user's answer. Normalising here, at the one platform-agnostic entry point,
-    fixes the whole class in one place instead of per-adapter.
 
-    Dict unwrap order is the canonical LLM tool-call user-facing keys:
-    ``label`` → ``description`` → ``text`` → ``title``. ``name`` and ``value``
-    are deliberately excluded — they're component-shaped fields that could
-    carry raw enum values or short identifiers, not human-readable labels. A
-    dict with none of the canonical keys is dropped (returns ""), since a
-    garbage label is worse than no choice at all.
+def _resolve_response_mode(user_response, choices) -> tuple:
+    """Classify the callback's return value into a (mode, value) pair.
+
+    The wire contract:
+
+      - ``{"mode": "selected", "value": "<choice text>"}`` — the UI confirms
+        the user picked a specific offered choice. Returns
+        ``("selected", value)`` ONLY when ``value`` matches one of
+        ``choices`` exactly (substring matches are NOT accepted — the user
+        might be typing the start of a custom answer).
+
+      - ``{"mode": "freetext", "value": "<typed text>"}`` — the user
+        explicitly used the Other channel. Intent is acknowledged;
+        returns ``("freetext", value)``.
+
+      - Plain string — legacy callers (tests, oneshot fallback, anything
+        that doesn't have a structured UI). If the string matches an
+        offered choice exactly, treat as "selected" so the legacy path
+        still works. Otherwise "unresolved" — the agent MUST halt rather
+        than infer the most plausible pick.
+
+      - Any other shape (unknown mode dict, list, scalar, None) →
+        ``("unresolved", str(user_response).strip())`` so the agent can
+        see what came back without mistaking it for a pick.
+
+    Returns ``(mode_str, value_str)``. ``value_str`` is the canonical
+    text to surface to the agent (whitespace-stripped).
     """
-    if c is None:
-        return ""
-    if isinstance(c, str):
-        return c.strip()
-    if isinstance(c, dict):
-        for key in ("label", "description", "text", "title"):
-            v = c.get(key)
-            if isinstance(v, str) and v.strip():
-                return v.strip()
-        return ""
-    if isinstance(c, (list, tuple)):
-        return " ".join(_flatten_choice(x) for x in c).strip()
-    return str(c).strip()
+    # Dict: structured UI contract.
+    if isinstance(user_response, dict):
+        mode = user_response.get("mode")
+        value = user_response.get("value", "")
+        if not isinstance(value, str):
+            value = str(value)
+        value = value.strip()
+        if mode == _RESPONSE_MODE_SELECTED and isinstance(choices, list) and value in choices:
+            return _RESPONSE_MODE_SELECTED, value
+        if mode == _RESPONSE_MODE_FREETEXT:
+            return _RESPONSE_MODE_FREETEXT, value
+        # Unknown mode or "selected" with a non-matching value — treat as
+        # unresolved. The caller tagged it incorrectly or it's noise.
+        return _RESPONSE_MODE_UNRESOLVED, value
 
+    # Plain string: legacy contract. Exact-match against offered choices
+    # counts as "selected" so older callers still get a coherent result.
+    if isinstance(user_response, str):
+        value = user_response.strip()
+        if isinstance(choices, list) and value in choices:
+            return _RESPONSE_MODE_SELECTED, value
+        return _RESPONSE_MODE_UNRESOLVED, value
 
-def _resolve_response_mode(
-    user_response: str,
-    choices_offered: Optional[List[str]],
-    structured: Any,
-) -> str:
-    """Tag a callback return with one of three modes.
-
-    Modes:
-      - ``"selected"``  — the user picked one of the offered choices.
-      - ``"freetext"``  — the user typed a deliberate custom answer (Other
-                          channel, or an open-ended question).
-      - ``"unresolved"`` — the response did NOT answer the gate. The agent
-                          MUST halt and re-issue, not infer a pick.
-
-    Resolution rules (see ``references/clarify-tool-callback-discipline.md``
-    in the interactive-plan skill for the full table):
-
-      1. Empty / whitespace-only user_response → ``"unresolved"``.
-         Empty input means the user did not decide, never 'approved by silence'.
-      2. Gateway timeout/cancel sentinels → ``"unresolved"`` regardless of mode.
-         These flow back from ``gateway/run.py::_clarify_callback_sync`` when
-         the prompt could not be delivered or the user never responded within
-         the timeout. The agent MUST NOT proceed as if the user picked.
-      3. Structured ``{mode: "selected", value}`` where value strictly
-         matches one of choices_offered → ``"selected"``.
-      4. Structured ``{mode: "selected", value}`` where value does NOT
-         match a choice → ``"unresolved"``. A structured 'selected' tag
-         with a non-matching value is a UI bug; surface it instead of
-         silently accepting.
-      5. Structured ``{mode: "freetext", value}`` → ``"freetext"``.
-      6. Structured unknown mode → ``"unresolved"``.
-      7. Plain-string ``user_response`` (legacy / tests) that strictly
-         matches a choice → ``"selected"``.
-      8. Plain-string ``user_response`` that does NOT match a choice:
-           - If choices_offered is None (open-ended) → ``"freetext"``.
-             In open-ended mode, any text the user typed IS the answer.
-           - If choices_offered is non-None (multi-choice) → ``"unresolved"``.
-             The user typed text that wasn't an offered choice — could be
-             debug text, a bug report, or 'Other' that the adapter forgot
-             to tag. The agent must halt and re-prompt, not infer.
-
-    Strict equality on step 7 is intentional. Substring matching would
-    collapse choices like 'Approve and ship' / 'Approve but skip' into a
-    single 'Approve' → 'selected' that loses the choice's full context.
-    """
-    # Rule 1 — empty / whitespace
-    if not user_response or not user_response.strip():
-        return "unresolved"
-
-    # Rule 2 — gateway sentinels beat everything else
-    if _is_gateway_sentinel(user_response.strip()):
-        return "unresolved"
-
-    # Rules 3-6 — structured callback shape
-    if isinstance(structured, dict):
-        mode = structured.get("mode")
-        value = structured.get("value")
-        if mode == "selected" and isinstance(value, str):
-            if choices_offered is not None:
-                # Strict equality only — see docstring rule 7.
-                return "selected" if value in choices_offered else "unresolved"
-            # Open-ended has no choices to match against; a structured
-            # 'selected' with no choices_offered is meaningless → unresolved.
-            return "unresolved"
-        if mode == "freetext" and isinstance(value, str):
-            return "freetext"
-        # Unknown / malformed structured → unresolved
-        return "unresolved"
-
-    # Rules 7-8 — legacy plain-string fallback
-    if choices_offered is not None:
-        return "selected" if user_response in choices_offered else "unresolved"
-    # Open-ended — any text the user typed is a deliberate answer.
-    return "freetext"
+    # Anything else (None, int, list, ...): coerce to string, mark
+    # unresolved. The agent MUST halt rather than treat this as a pick.
+    value = str(user_response).strip() if user_response is not None else ""
+    return _RESPONSE_MODE_UNRESOLVED, value
 
 
 def clarify_tool(
@@ -204,21 +166,7 @@ def clarify_tool(
                   Injected by the agent runner (cli.py / gateway).
 
     Returns:
-        JSON string with::
-
-            {
-              "question":            "...",
-              "choices_offered":     [...],          # null for open-ended
-              "user_response":       "<the text>",
-              "user_response_mode":  "selected" | "freetext" | "unresolved"
-            }
-
-        The ``user_response_mode`` tag is the wire contract that lets the
-        agent distinguish a real user pick from debug text / sentinels /
-        oneshot-mode fallbacks. Agents MUST halt on ``"unresolved"`` and
-        re-issue the gate, never infer the most plausible choice from
-        response text. See ``interactive-plan/references/clarify-tool-
-        callback-discipline.md`` for the full discipline.
+        JSON string with the user's response.
     """
     if not question or not question.strip():
         return tool_error("Question text is required.")
@@ -234,6 +182,10 @@ def clarify_tool(
         # user-facing text here — the single platform-agnostic entry point —
         # so the CLI panel, Discord buttons, and Telegram list all render clean
         # text and the resolved answer is never a raw Python dict repr.
+        # Unwrap one level of list nesting (LLMs sometimes emit
+        # choices=[["a", "b", "c"]] instead of ["a", "b", "c"] — see
+        # _flatten_outer_lists for the bug this guards against).
+        choices = _flatten_outer_lists(choices)
         choices = [s for s in (_flatten_choice(c) for c in choices) if s]
         if len(choices) > MAX_CHOICES:
             choices = choices[:MAX_CHOICES]
@@ -247,52 +199,23 @@ def clarify_tool(
         )
 
     try:
-        user_response = callback(question, choices)
+        raw_response = callback(question, choices)
     except Exception as exc:
         return json.dumps(
             {"error": f"Failed to get user input: {exc}"},
             ensure_ascii=False,
         )
 
-    # Resolve the wire-level ``user_response`` text and the mode tag together.
-    #
-    # Two callback shapes are legal:
-    #
-    #   1. Plain string (legacy + tests + the gateway's _clarify_callback_sync):
-    #      treated as the raw text the user produced. The resolver checks it
-    #      against choices_offered to decide selected / freetext / unresolved.
-    #
-    #   2. Structured ``{mode, value}`` (UI layers that explicitly tag the
-    #      answer's shape — Telegram button-tap wrapper, Discord embed-id
-    #      resolver, etc.): the mode tag is honored ONLY when the value
-    #      passes the strict-equality check for ``"selected"`` (rule 3-4).
-    #      A structured ``"freetext"`` is always honored (rule 5) because
-    #      by definition it carries user-typed text that wasn't a choice.
-    #
-    # Anything else (None, list, scalar, malformed dict) becomes empty
-    # ``user_response`` + ``unresolved`` so the agent halts instead of
-    # guessing.
-    structured = None
-    if isinstance(user_response, dict):
-        mode_in = user_response.get("mode")
-        value_in = user_response.get("value")
-        if mode_in in {"selected", "freetext"} and isinstance(value_in, str):
-            structured = {"mode": mode_in, "value": value_in}
-            response_text = value_in.strip()
-        else:
-            response_text = ""
-    elif user_response is None:
-        response_text = ""
-    else:
-        response_text = str(user_response).strip()
-
-    mode = _resolve_response_mode(response_text, choices, structured)
+    # Tag the response mode so the agent can distinguish a real pick from
+    # a freetext custom answer from a noisy non-answer (bug #2: agent
+    # treating absence of a real answer as implicit approval).
+    response_mode, user_response_value = _resolve_response_mode(raw_response, choices)
 
     return json.dumps({
         "question": question,
         "choices_offered": choices,
-        "user_response": response_text,
-        "user_response_mode": mode,
+        "user_response": user_response_value,
+        "user_response_mode": response_mode,
     }, ensure_ascii=False)
 
 
