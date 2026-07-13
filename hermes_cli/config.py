@@ -3944,6 +3944,23 @@ def clear_model_endpoint_credentials(
     return model_cfg
 
 
+def normalize_extra_headers(extra_headers: Any) -> Dict[str, str]:
+    """Normalize a raw ``extra_headers`` value into a ``dict[str, str]``.
+
+    Stringifies keys and values and drops entries whose value is ``None``.
+    Returns ``{}`` for non-dict or empty inputs. This is the single shared
+    normalizer for per-provider ``extra_headers`` across config normalization,
+    runtime resolution, client construction, and live ``/models`` discovery.
+
+    SECURITY: header values routinely carry credentials (Cloudflare Access
+    service tokens, proxy auth, custom bearer schemes). Callers must never
+    log the returned values.
+    """
+    if not isinstance(extra_headers, dict) or not extra_headers:
+        return {}
+    return {str(k): str(v) for k, v in extra_headers.items() if v is not None}
+
+
 def get_missing_config_fields() -> List[Dict[str, Any]]:
     """
     Check which config fields are missing or outdated (recursive).
@@ -5555,6 +5572,23 @@ def read_raw_config() -> Dict[str, Any]:
             data = {}
         _RAW_CONFIG_CACHE[path_key] = (cache_key[0], cache_key[1], copy.deepcopy(data))
         return data
+
+
+def atomic_config_write(config_path: "Path", data: Any, **kwargs: Any) -> None:
+    """Fail-closed atomic write for ``config.yaml``.
+
+    Single chokepoint every config-update path should use instead of
+    calling utils.atomic_yaml_write directly. Runs
+    require_readable_config_before_write first, so a full-file
+    replacement can never silently clobber an existing config.yaml that
+    degraded to an empty dict on read. New-file creation still works
+    when the path is absent.
+
+    ``kwargs`` are forwarded verbatim to atomic_yaml_write.
+    """
+    from utils import atomic_yaml_write
+    require_readable_config_before_write(config_path)
+    atomic_yaml_write(config_path, data, **kwargs)
 
 
 def require_readable_config_before_write(config_path: Optional[Path] = None) -> None:

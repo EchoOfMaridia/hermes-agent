@@ -41,6 +41,47 @@ class _Snowflake:
 
 VALID_THREAD_AUTO_ARCHIVE_MINUTES = {60, 1440, 4320, 10080}
 _DISCORD_COMMAND_SYNC_POLICIES = {"safe", "bulk", "off"}
+
+# Discord interactive prompt timeout (the time the bot waits for the
+# user to click a button / open a modal before the interaction is
+# auto-expired). Configurable via the discord.prompt_timeout_seconds
+# config field; defaults here match the upstream afb5808d8
+# 'feat(discord): make interactive view timeout configurable' patch.
+_DISCORD_PROMPT_TIMEOUT_DEFAULT = 300
+_DISCORD_PROMPT_TIMEOUT_MIN = 30
+_DISCORD_PROMPT_TIMEOUT_MAX = 900
+
+
+def _read_discord_prompt_timeout() -> int:
+    """Read the configured Discord interactive prompt timeout.
+
+    Reads config["discord"]["prompt_timeout_seconds"] with sane defaults
+    (300s = 5min) and clamps to [_DISCORD_PROMPT_TIMEOUT_MIN,
+    _DISCORD_PROMPT_TIMEOUT_MAX] to avoid pathological values from
+    operators editing config.yaml directly. Returns the validated
+    integer.
+    """
+    try:
+        from hermes_cli.config import load_config
+        config = load_config()
+        raw = (
+            config.get("discord", {}).get("prompt_timeout_seconds")
+            if isinstance(config.get("discord"), dict)
+            else None
+        )
+    except Exception:
+        return _DISCORD_PROMPT_TIMEOUT_DEFAULT
+    if raw is None or raw == "":
+        return _DISCORD_PROMPT_TIMEOUT_DEFAULT
+    try:
+        seconds = int(raw)
+    except (TypeError, ValueError):
+        return _DISCORD_PROMPT_TIMEOUT_DEFAULT
+    if seconds < _DISCORD_PROMPT_TIMEOUT_MIN:
+        return _DISCORD_PROMPT_TIMEOUT_MIN
+    if seconds > _DISCORD_PROMPT_TIMEOUT_MAX:
+        return _DISCORD_PROMPT_TIMEOUT_MAX
+    return seconds
 # Staleness threshold for the fingerprint-based sync skip.  When the
 # last successful sync is older than this, the gateway forces a re-sync
 # even when the fingerprint matches — this gives us a periodic
