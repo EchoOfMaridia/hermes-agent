@@ -92,6 +92,11 @@ def register(ctx) -> None:
     from plugins.hermes_workflow.gateway_late_wire import (
         build_late_wire_callback,
     )
+    from plugins.hermes_workflow.fallback_dispatch import (
+        FallbackDispatchSink,
+        attach_fallback_sink,
+        drain_sink_to_ctx,
+    )
 
     _log = logging.getLogger("hermes_workflow")
     manifest = getattr(ctx, "manifest", None)
@@ -105,6 +110,25 @@ def register(ctx) -> None:
     # to call the host's structured-output LLM with a JSON Schema that
     # produces a valid workflow script.
     script_author = ScriptAuthor(llm=ctx.llm)
+
+    # Capture into ctx so tests and downstream surfaces can introspect
+    # the wiring. MockPluginContext records these for assertions; the
+    # production PluginContext accepts arbitrary attribute writes.
+    ctx.runtime = runtime
+    ctx.script_author = script_author
+
+    # Attach a FallbackDispatchSink so workflow events reach the chat
+    # surface via ctx.inject_message even when the gateway dispatcher
+    # isn't wired (hermes-desktop default). attach_fallback_sink is
+    # idempotent — if a real gateway dispatcher is already wired it
+    # returns None and we skip the sink step.
+    fallback_sink: FallbackDispatchSink | None = None
+    try:
+        fallback_sink = attach_fallback_sink(runtime)
+    except Exception as e:
+        _log.debug("attach_fallback_sink failed: %s", e)
+    if fallback_sink is not None:
+        ctx._fallback_sink = fallback_sink
 
     # Surface 1: CLI subcommands.
     def _cli_default_handler(args):
