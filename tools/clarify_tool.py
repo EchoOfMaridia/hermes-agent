@@ -89,6 +89,12 @@ def _flatten_choice(c) -> str:
 _RESPONSE_MODE_SELECTED = "selected"
 _RESPONSE_MODE_FREETEXT = "freetext"
 _RESPONSE_MODE_UNRESOLVED = "unresolved"
+
+# Sentinel string returned by the gateway when a clarify prompt was
+# unanswered (timeout / cancel / session-boundary cleanup).  Matches
+# structurally so any timeout duration ("1m", "60m") is caught without
+# hard-coding.  These are NEVER a real user answer.
+_GATEWAY_TIMEOUT_SENTINEL_PREFIXES = ("[user did not respond within ",)
 _KNOWN_RESPONSE_MODES = {_RESPONSE_MODE_SELECTED, _RESPONSE_MODE_FREETEXT}
 
 
@@ -137,10 +143,22 @@ def _resolve_response_mode(user_response, choices) -> tuple:
 
     # Plain string: legacy contract. Exact-match against offered choices
     # counts as "selected" so older callers still get a coherent result.
+    # In open-ended mode (choices is None) any text the user typed is, by
+    # definition, a deliberate answer — tag as "freetext" so the agent
+    # can proceed with the value. (Multi-choice non-match stays "unresolved":
+    # the user typed something that wasn't on the menu.)
+    # The gateway timeout / cancel sentinel (e.g. "[user did not respond
+    # within 1m]") is never a real user answer — tag as "unresolved"
+    # regardless of open-ended mode so the agent halts rather than treats
+    # absence of a real answer as a pick.
     if isinstance(user_response, str):
         value = user_response.strip()
+        if value.startswith(_GATEWAY_TIMEOUT_SENTINEL_PREFIXES):
+            return _RESPONSE_MODE_UNRESOLVED, value
         if isinstance(choices, list) and value in choices:
             return _RESPONSE_MODE_SELECTED, value
+        if not isinstance(choices, list):
+            return _RESPONSE_MODE_FREETEXT, value
         return _RESPONSE_MODE_UNRESOLVED, value
 
     # Anything else (None, int, list, ...): coerce to string, mark
