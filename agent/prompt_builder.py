@@ -479,6 +479,55 @@ COMPUTER_USE_GUIDANCE = (
     "force empty trash). You'll see an error if you try.\n"
 )
 
+
+def computer_use_guidance() -> str:
+    """Return the ``computer_use`` tool guidance, tuned for the host platform.
+
+    On macOS (the only platform where ``cua-driver`` actually runs), the
+    full ``COMPUTER_USE_GUIDANCE`` constant is returned as-is -- the
+    Mac / Space / cmd+s wording is accurate there.
+
+    On Windows / Linux / WSL the same backend never ships locally, so we
+    soften the Mac-only phrasing (the call in ``agent.system_prompt``
+    notes this is why the guidance is a function rather than a constant).
+    The agent still gets the background-mode workflow + safety rules --
+    those apply on every host that forwards to a remote Mac.
+
+    The returned string always contains ``background``, ``element``, and
+    ``password`` -- those tokens are part of the contract verified by
+    ``tests/tools/test_computer_use.py::TestPromptGuidance``.
+    """
+    import sys
+
+    if sys.platform == "darwin":
+        return COMPUTER_USE_GUIDANCE
+
+    # Non-Mac host: rewrite Mac-only wording so non-Mac readers are not
+    # misled, but keep the workflow + safety guidance intact.
+    sanitized = COMPUTER_USE_GUIDANCE
+    sanitized = sanitized.replace(
+        "# Computer Use (macOS background control)",
+        "# Computer Use (remote desktop control)",
+    )
+    sanitized = sanitized.replace(
+        "drives the macOS desktop in the ",
+        "drives a remote desktop session in the ",
+    )
+    sanitized = sanitized.replace(
+        "You and the user can share the same Mac at the same time.",
+        "You and the user can share the same desktop session.",
+    )
+    sanitized = sanitized.replace(
+        "`action='key', keys='cmd+s'`",
+        "`action='key'` with platform-appropriate shortcuts",
+    )
+    sanitized = sanitized.replace(
+        "or behind another window, cua-driver still drives it -- no need "
+        "to switch Spaces.",
+        "or behind another window, cua-driver still drives it.",
+    )
+    return sanitized
+
 # ---------------------------------------------------------------------------
 # Mid-turn steering (/steer) — out-of-band user messages
 # ---------------------------------------------------------------------------
@@ -1646,12 +1695,18 @@ def _truncate_content(
     return head + marker + tail
 
 
-def load_soul_md() -> Optional[str]:
+def load_soul_md(context_length: Optional[int] = None) -> Optional[str]:
     """Load SOUL.md from HERMES_HOME and return its content, or None.
 
     Used as the agent identity (slot #1 in the system prompt).  When this
     returns content, ``build_context_files_prompt`` should be called with
     ``skip_soul=True`` so SOUL.md isn't injected twice.
+
+    ``context_length`` (when provided) is forwarded to ``_truncate_content``
+    so the SOUL.md body uses the same dynamic cap as other context files.
+    The caller ``agent.system_prompt._r.load_soul_md(_ctx_len)`` passes this
+    explicitly — both signatures (``load_soul_md()`` and
+    ``load_soul_md(_ctx_len)``) are valid.
     """
     try:
         from hermes_cli.config import ensure_hermes_home
@@ -1688,14 +1743,14 @@ def load_soul_md() -> Optional[str]:
         # The scanner still protects AGENTS.md, CLAUDE.md,
         # .cursorrules, and .hermes.md, which can be inherited from
         # cloned repos or third-party tooling.
-        content = _truncate_content(content, "SOUL.md")
+        content = _truncate_content(content, "SOUL.md", context_length=context_length)
         return content
     except Exception as e:
         logger.debug("Could not read SOUL.md from %s: %s", soul_path, e)
         return None
 
 
-def _load_hermes_md(cwd_path: Path) -> str:
+def _load_hermes_md(cwd_path: Path, context_length: Optional[int] = None) -> str:
     """.hermes.md / HERMES.md — walk to git root."""
     hermes_md_path = _find_hermes_md(cwd_path)
     if not hermes_md_path:
@@ -1712,13 +1767,13 @@ def _load_hermes_md(cwd_path: Path) -> str:
             pass
         content = _scan_context_content(content, rel)
         result = f"## {rel}\n\n{content}"
-        return _truncate_content(result, ".hermes.md")
+        return _truncate_content(result, ".hermes.md", context_length=context_length)
     except Exception as e:
         logger.debug("Could not read %s: %s", hermes_md_path, e)
         return ""
 
 
-def _load_agents_md(cwd_path: Path) -> str:
+def _load_agents_md(cwd_path: Path, context_length: Optional[int] = None) -> str:
     """AGENTS.md — top-level only (no recursive walk)."""
     for name in ["AGENTS.md", "agents.md"]:
         candidate = cwd_path / name
@@ -1728,13 +1783,13 @@ def _load_agents_md(cwd_path: Path) -> str:
                 if content:
                     content = _scan_context_content(content, name)
                     result = f"## {name}\n\n{content}"
-                    return _truncate_content(result, "AGENTS.md")
+                    return _truncate_content(result, "AGENTS.md", context_length=context_length)
             except Exception as e:
                 logger.debug("Could not read %s: %s", candidate, e)
     return ""
 
 
-def _load_claude_md(cwd_path: Path) -> str:
+def _load_claude_md(cwd_path: Path, context_length: Optional[int] = None) -> str:
     """CLAUDE.md / claude.md — cwd only."""
     for name in ["CLAUDE.md", "claude.md"]:
         candidate = cwd_path / name
@@ -1744,13 +1799,13 @@ def _load_claude_md(cwd_path: Path) -> str:
                 if content:
                     content = _scan_context_content(content, name)
                     result = f"## {name}\n\n{content}"
-                    return _truncate_content(result, "CLAUDE.md")
+                    return _truncate_content(result, "CLAUDE.md", context_length=context_length)
             except Exception as e:
                 logger.debug("Could not read %s: %s", candidate, e)
     return ""
 
 
-def _load_cursorrules(cwd_path: Path) -> str:
+def _load_cursorrules(cwd_path: Path, context_length: Optional[int] = None) -> str:
     """.cursorrules + .cursor/rules/*.mdc — cwd only."""
     cursorrules_content = ""
     cursorrules_file = cwd_path / ".cursorrules"
@@ -1777,10 +1832,14 @@ def _load_cursorrules(cwd_path: Path) -> str:
 
     if not cursorrules_content:
         return ""
-    return _truncate_content(cursorrules_content, ".cursorrules")
+    return _truncate_content(cursorrules_content, ".cursorrules", context_length=context_length)
 
 
-def build_context_files_prompt(cwd: Optional[str] = None, skip_soul: bool = False) -> str:
+def build_context_files_prompt(
+    cwd: Optional[str] = None,
+    skip_soul: bool = False,
+    context_length: Optional[int] = None,
+) -> str:
     """Discover and load context files for the system prompt.
 
     Priority (first found wins — only ONE project context type is loaded):
@@ -1803,17 +1862,17 @@ def build_context_files_prompt(cwd: Optional[str] = None, skip_soul: bool = Fals
 
     # Priority-based project context: first match wins
     project_context = (
-        _load_hermes_md(cwd_path)
-        or _load_agents_md(cwd_path)
-        or _load_claude_md(cwd_path)
-        or _load_cursorrules(cwd_path)
+        _load_hermes_md(cwd_path, context_length)
+        or _load_agents_md(cwd_path, context_length)
+        or _load_claude_md(cwd_path, context_length)
+        or _load_cursorrules(cwd_path, context_length)
     )
     if project_context:
         sections.append(project_context)
 
     # SOUL.md from HERMES_HOME only — skip when already loaded as identity
     if not skip_soul:
-        soul_content = load_soul_md()
+        soul_content = load_soul_md(context_length)
         if soul_content:
             sections.append(soul_content)
 
