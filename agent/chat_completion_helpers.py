@@ -38,6 +38,7 @@ from utils import base_url_host_matches, base_url_hostname, env_int
 
 logger = logging.getLogger(__name__)
 _OPENROUTER_PROVIDER_SORT_VALUES = {"throughput", "latency", "price"}
+_FALLBACK_EXHAUSTED_COOLDOWN_S = 5.0
 
 
 def _ra():

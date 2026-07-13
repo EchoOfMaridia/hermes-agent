@@ -118,6 +118,7 @@ _PATTERNS: List[Tuple[str, str, str]] = [
 # Aligned with skills_guard.py INVISIBLE_CHARS — directional isolates
 # (U+2066-U+2069) and invisible math operators (U+2062-U+2064) are real
 # attack tools.
+MAX_SCAN_CHARS = 65_536
 INVISIBLE_CHARS = frozenset({
     '\u200b',  # zero-width space
     '\u200c',  # zero-width non-joiner
@@ -205,6 +206,12 @@ def scan_for_threats(content: str, scope: str = "context") -> List[str]:
         return []
 
     findings: List[str] = []
+
+    # Bounded scan: clamp the input to MAX_SCAN_CHARS so worst-case regex
+    # runtime stays predictable. Detection near the beginning of injected
+    # content is preserved; only detection of threats positioned past the
+    # cap is lost, which is the intended trade-off.
+    content = content[:MAX_SCAN_CHARS]
 
     # Invisible unicode — single pass through the content set, not 17
     # ``in`` lookups.
