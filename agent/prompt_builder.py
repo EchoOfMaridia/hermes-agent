@@ -7,6 +7,7 @@ assemble pieces, then combines them with memory and ephemeral prompts.
 import json
 import logging
 import os
+import contextvars
 import threading
 from collections import OrderedDict
 from pathlib import Path
@@ -996,6 +997,85 @@ CONTEXT_FILE_MAX_CHARS = 20_000
 CONTEXT_TRUNCATE_HEAD_RATIO = 0.7
 CONTEXT_TRUNCATE_TAIL_RATIO = 0.2
 
+# Dynamic cap ceiling. When the model context window is huge, the per-file
+# cap scales up but is clamped here so a single context file can never
+# dominate the system prompt.
+_CONTEXT_FILE_DYNAMIC_CEILING = 96_000
+
+# Truncation-warning accumulator. Stored as a ContextVar so warnings from a
+# concurrent build in a child context do not leak into the parent context
+# (test_warnings_isolated_across_contexts).
+_TRUNCATION_WARNINGS = contextvars.ContextVar(
+    "prompt_builder_truncation_warnings", default=None
+)
+
+
+def _get_truncation_warnings_slot():
+    existing = _TRUNCATION_WARNINGS.get()
+    if existing is None:
+        existing = []
+        _TRUNCATION_WARNINGS.set(existing)
+    return existing
+
+
+def drain_truncation_warnings():
+    """Return and clear the current context accumulated truncation warnings.
+
+    Used by `agent.system_prompt` to surface truncation events through the
+    normal agent status channel so gateway/CLI users see them in chat.
+    Returns a fresh list snapshot; the underlying slot is reset so the next
+    call sees only new warnings raised after this one.
+    """
+    slot = _TRUNCATION_WARNINGS.get()
+    if slot is None:
+        return []
+    pending = list(slot)
+    slot.clear()
+    return pending
+
+
+def _dynamic_context_file_max_chars(context_length):
+    """Compute a per-file char cap that scales with the model context window.
+
+    Returns `CONTEXT_FILE_MAX_CHARS` (20K) as a floor when the window is
+    small or unspecified, and grows up to `_CONTEXT_FILE_DYNAMIC_CEILING`
+    for very large windows. `None` and 0 are treated as "no dynamic info
+    available" and fall back to the flat default.
+
+    The 0.06 multiplier (== 0.24 chars/token at 4 chars/token) matches
+    upstream prompt-builder guidance for context-file budget allocation and
+    keeps us comfortably above Codex 32 KiB project_doc default at 200K.
+    """
+    if not context_length or context_length <= 0:
+        return CONTEXT_FILE_MAX_CHARS
+    scaled = int(context_length * 4 * 0.06)
+    if scaled < CONTEXT_FILE_MAX_CHARS:
+        return CONTEXT_FILE_MAX_CHARS
+    if scaled > _CONTEXT_FILE_DYNAMIC_CEILING:
+        return _CONTEXT_FILE_DYNAMIC_CEILING
+    return scaled
+
+
+def _get_context_file_max_chars(context_length=None):
+    """Resolve the per-file char cap for the current model/config.
+
+    Priority:
+      1. `context_file_max_chars` from operator config (always wins).
+      2. Dynamic cap derived from the live context window.
+      3. Flat default `CONTEXT_FILE_MAX_CHARS`.
+
+    A defensive try/except keeps config-load errors from breaking
+    `build_context_files_prompt` -- we would rather under-truncate than crash.
+    """
+    try:
+        from hermes_cli.config import load_config
+        configured = (load_config() or {}).get("context_file_max_chars")
+    except Exception:
+        configured = None
+    if isinstance(configured, int) and configured > 0:
+        return configured
+    return _dynamic_context_file_max_chars(context_length)
+
 
 # =========================================================================
 # Skills prompt cache
@@ -1502,15 +1582,67 @@ def build_nous_subscription_prompt(valid_tool_names: "set[str] | None" = None) -
 # Context files (SOUL.md, AGENTS.md, .cursorrules)
 # =========================================================================
 
-def _truncate_content(content: str, filename: str, max_chars: int = CONTEXT_FILE_MAX_CHARS) -> str:
-    """Head/tail truncation with a marker in the middle."""
+def _truncate_content(
+    content: str,
+    filename: str,
+    max_chars: Optional[int] = None,
+    context_length: Optional[int] = None,
+    read_path: Optional[str] = None,
+) -> str:
+    """Head/tail truncation with a marker pointing the model at the full file.
+
+    Cap resolution priority:
+      1. Explicit `max_chars` arg (always wins, suppresses warning).
+      2. `context_file_max_chars` from operator config.
+      3. Dynamic cap derived from the live context window.
+      4. Flat default `CONTEXT_FILE_MAX_CHARS` (20K).
+
+    When truncation kicks in via config or dynamic cap (i.e. not because the
+    caller passed `max_chars`), a warning is appended to the current
+    `drain_truncation_warnings()` slot so the agent can surface it through
+    the normal status channel.
+    """
+    if max_chars is None:
+        max_chars = _get_context_file_max_chars(context_length)
+        warned_max_source = "config"  # either config-driven or dynamic
+    else:
+        warned_max_source = None
+
     if len(content) <= max_chars:
         return content
+
     head_chars = int(max_chars * CONTEXT_TRUNCATE_HEAD_RATIO)
     tail_chars = int(max_chars * CONTEXT_TRUNCATE_TAIL_RATIO)
     head = content[:head_chars]
     tail = content[-tail_chars:]
-    marker = f"\n\n[...truncated {filename}: kept {head_chars}+{tail_chars} of {len(content)} chars. Use file tools to read the full file.]\n\n"
+    target_for_read = read_path or filename
+    marker = (
+        f"\n\n[...truncated {filename}: kept {head_chars}+{tail_chars} of "
+        f"{len(content)} chars. Use read_file to access the full file at "
+        f"{target_for_read}.]\n\n"
+    )
+
+    if warned_max_source is not None:
+        slot = _get_truncation_warnings_slot()
+        try:
+            from hermes_cli.config import load_config
+            configured = (load_config() or {}).get("context_file_max_chars")
+        except Exception:
+            configured = None
+        if isinstance(configured, int) and configured > 0:
+            hint = (
+                f"Truncated '{filename}'. Raise context_file_max_chars in "
+                f"config (currently {configured}) to avoid truncating this "
+                f"context file."
+            )
+        else:
+            hint = (
+                f"Truncated '{filename}' to fit model context window. "
+                f"Set context_file_max_chars in config to override the "
+                f"per-file cap if you want this file inline in full."
+            )
+        slot.append(hint)
+
     return head + marker + tail
 
 
