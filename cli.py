@@ -3786,6 +3786,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
         self._stream_box_opened = False  # True while the response box is open on screen
         self._stream_completed = False  # True after _flush_stream closes the box (survives flush for finalizer gate)
         self._reasoning_preview_buf = ""  # Coalesce tiny reasoning chunks for [thinking] output
+        self._reasoning_buffered_for_after_response = ""  # Per-turn buffer; finalizer renders after the response box closes
         # Table-row buffer.  When a streamed line looks like it could be
         # part of a markdown table, hold it here until the block ends so
         # we can re-pad with wcwidth-aware widths.  Empty by default;
@@ -5567,40 +5568,24 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
             ChatConsole().print(f"[bold {_accent_hex()}]●[/] [bold]{_escape(text)}[/]")
 
     def _stream_reasoning_delta(self, text: str) -> None:
-        """Stream reasoning/thinking tokens into a dim box above the response.
+        """Buffer reasoning/thinking tokens for rendering AFTER the response.
 
-        Opens a dim reasoning box on first token, streams line-by-line.
-        The box is closed automatically when content tokens start arriving
-        (via _stream_delta → _emit_stream_text).
-
-        Once the response box is open, suppress any further reasoning
-        rendering — a late thinking block (e.g. after an interrupt) would
-        otherwise draw a reasoning box inside the response box.
+        Reasoning text accumulates into ``_reasoning_buffered_for_after_response``
+        rather than rendering live. The finalizer reads that buffer and
+        renders a single ``Reasoning`` panel after the response box closes.
+        This avoids the visual inversion where the live reasoning box
+        appears above the response box, inverting the temporal order
+        the user expects to read.
         """
         if not text:
             return
         self._reasoning_shown_this_turn = True
         if getattr(self, "_stream_box_opened", False):
             return
-
-        # Open reasoning box on first reasoning token
-        if not getattr(self, "_reasoning_box_opened", False):
-            self._reasoning_box_opened = True
-            w = self._scrollback_box_width()
-            r_label = " Reasoning "
-            r_fill = w - 2 - len(r_label)
-            _cprint(f"\n{_DIM}┌─{r_label}{'─' * max(r_fill - 1, 0)}┐{_RST}")
-
-        self._reasoning_buf = getattr(self, "_reasoning_buf", "") + text
-
-        # Emit complete lines, and force-flush long partial lines so
-        # reasoning is visible in real-time even without newlines.
-        while "\n" in self._reasoning_buf:
-            line, self._reasoning_buf = self._reasoning_buf.split("\n", 1)
-            _cprint(f"{_DIM}{line}{_RST}")
-        if len(self._reasoning_buf) > 80:
-            _cprint(f"{_DIM}{self._reasoning_buf}{_RST}")
-            self._reasoning_buf = ""
+        # Buffer reasoning text; finalizer renders it after the response.
+        self._reasoning_buffered_for_after_response = (
+            getattr(self, "_reasoning_buffered_for_after_response", "") + text
+        )
 
     def _close_reasoning_box(self) -> None:
         """Close the live reasoning box if it's open."""
@@ -5953,6 +5938,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
         self._reasoning_box_opened = False
         self._reasoning_buf = ""
         self._reasoning_preview_buf = ""
+        self._reasoning_buffered_for_after_response = ""
         self._deferred_content = ""
         self._stream_table_buf = []
         self._in_stream_table = False
@@ -12645,15 +12631,13 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
 
             response_previewed = result.get("response_previewed", False) if result else False
 
-            # Display reasoning (thinking) box if enabled and available.
-            # Skip when streaming already showed reasoning live.  Use the
-            # turn-persistent flag (_reasoning_shown_this_turn) instead of
-            # _reasoning_stream_started — the latter gets reset during
-            # intermediate turn boundaries (tool-calling loops), which caused
-            # the reasoning box to re-render after the final response.
-            _reasoning_already_shown = getattr(self, '_reasoning_shown_this_turn', False)
-            if self.show_reasoning and result and not _reasoning_already_shown:
-                reasoning = result.get("last_reasoning")
+            # Display the reasoning panel AFTER the response box closes.
+            # Reasoning text was buffered into _reasoning_buffered_for_after_response
+            # by _stream_reasoning_delta as it arrived (NOT rendered live,
+            # to avoid the visual inversion where reasoning appeared above
+            # the response box).
+            if self.show_reasoning:
+                reasoning = getattr(self, "_reasoning_buffered_for_after_response", "")
                 if reasoning:
                     w = self._scrollback_box_width()
                     r_label = " Reasoning "
@@ -12669,6 +12653,8 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
                     else:
                         display_reasoning = reasoning.strip()
                     _cprint(f"\n{r_top}\n{_DIM}{display_reasoning}{_RST}\n{r_bot}")
+                    # Clear after rendering so next turn doesn't double-render.
+                    self._reasoning_buffered_for_after_response = ""
 
             if response and not response_previewed:
                 # Use skin engine for label/color with fallback

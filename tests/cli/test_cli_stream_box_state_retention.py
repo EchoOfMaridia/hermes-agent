@@ -114,12 +114,17 @@ class TestReasoningEmittedWhenStreamBoxClosed:
         cli = _make_cli()
         cli._stream_box_opened = False  # pre-condition
 
-        cli._stream_reasoning_delta("fresh thought")
+        cli._stream_reasoning_delta("fresh thought\n")
 
-        assert cli._reasoning_box_opened is True
+        # New contract: reasoning text is buffered for the finalizer to
+        # render AFTER the response. The live reasoning box does NOT open.
+        assert cli._reasoning_box_opened is False, (
+            "Reasoning box should NOT open live — reasoning is buffered "
+            "for after-response rendering."
+        )
         assert cli._stream_box_opened is False
-        # The reasoning buf should now hold the chunk.
-        assert "fresh thought" in cli._reasoning_buf
+        # The reasoning text is in the per-turn buffer.
+        assert "fresh thought" in getattr(cli, "_reasoning_buffered_for_after_response", "")
 
 
 # ── Test 2: between-turn reset invariants ─────────────────────────────────────
