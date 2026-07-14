@@ -21,95 +21,19 @@ fix: route every user-facing line in ``_manual_compress`` through
 ``_cprint(...)`` so prompt_toolkit's renderer paints it above the input
 area instead of letting ``StdoutProxy`` swallow it.
 
-Implementation note (KISS): we construct ``HermesCLI`` via
-``HermesCLI.__new__(HermesCLI)`` and inject the agent attributes the
-test needs manually, instead of using ``tests.cli.test_cli_init``'s
-``_make_cli()`` factory. ``_make_cli`` performs an ``importlib.reload``
-under stubbed ``prompt_toolkit.*`` whose behaviour under per-file
-subprocess isolation (``scripts/run_tests.sh``) is order-dependent on
-whether ``cli`` resolves as a single-file module or a package — the
-mocking it does to ``get_tool_definitions`` works on the single-file
-form but raises ``AttributeError`` on the package form. Bypassing it
-gives us a deterministic shell across pytest, the subprocess runner,
-and any future test discovery. The actual fix and contract pin are
-what matter here — not the fixture mechanics.
+This test pins that contract.
 """
 
 from __future__ import annotations
 
-import sys
-from contextlib import nullcontext
 from unittest.mock import patch
 
 import pytest
 
-from cli import HermesCLI
-
-
-def _find_production_cli_module():
-    """Find the production ``cli`` module regardless of import alias.
-
-    Under ``scripts/run_tests.sh``'s per-file subprocess isolation
-    ``cli`` may load as either a single-file module (``.../cli.py``)
-    or a package (``.../cli/__init__.py``) depending on import order.
-    The ``__name__ == "cli"`` filter rejects sibling modules (the
-    test-side ``tests.cli`` package, ``hermes_cli.*``, and
-    ``prompt_toolkit.filters.cli``).
-    """
-    for mod in sys.modules.values():
-        f = getattr(mod, "__file__", None)
-        if not f:
-            continue
-        if getattr(mod, "__name__", "") != "cli":
-            continue
-        if f.endswith("/cli.py") or f.endswith("/cli/__init__.py"):
-            return mod
-    raise AssertionError("could not locate the production cli module")
-
-
-def _patch_cprint_on_prod_module(monkeypatch, capture: list[str]):
-    """Patch ``_cprint`` on the live production ``cli`` module."""
-    target = _find_production_cli_module()
-    monkeypatch.setattr(target, "_cprint",
-                        lambda text: capture.append(text))
-    return target
-
-
-class _DummyAgent:
-    """Stand-in agent whose ``_compress_context`` returns a smaller result
-    than the input so manual_compression_feedback reports a real change
-    (not a noop)."""
-
-    def __init__(self):
-        self.compression_enabled = True
-        self._cached_system_prompt = "FULL CACHED SYSTEM PROMPT SHOULD NOT BE NESTED"
-        self.session_id = "new-session"
-        self.calls = []
-        self.flushed_calls = []
-
-    def _compress_context(
-        self,
-        messages,
-        system_message,
-        *,
-        approx_tokens=None,
-        focus_topic=None,
-        force=False,
-    ):
-        self.calls.append(
-            {
-                "messages": messages,
-                "system_message": system_message,
-                "approx_tokens": approx_tokens,
-                "focus_topic": focus_topic,
-                "force": force,
-            }
-        )
-        return [{"role": "user", "content": "[CONTEXT SUMMARY]: compacted"}], "sp"
-
-    def _flush_messages_to_session_db(self, messages, role):
-        self.flushed_calls.append((list(messages), role))
-        return None
+from tests.cli._helpers.manual_compress_shell import (
+    build_test_shell,
+    patch_cprint,
+)
 
 
 _REAL_SUMMARY_PAYLOAD = {
@@ -122,7 +46,10 @@ _REAL_SUMMARY_PAYLOAD = {
 
 @pytest.fixture
 def _cli(monkeypatch):
-    """Build a HermesCLI ready to run _manual_compress, with mocks isolated."""
+    """Build a HermesCLI whose agent returns the canned summary payload
+    so the assertions have a deterministic head/token/note to look for."""
+    from cli import HermesCLI
+
     monkeypatch.setattr(
         "agent.manual_compression_feedback.summarize_manual_compression",
         lambda *args, **kwargs: _REAL_SUMMARY_PAYLOAD,
@@ -135,9 +62,23 @@ def _cli(monkeypatch):
         {"role": "user", "content": "three"},
         {"role": "assistant", "content": "four"},
     ]
-    cli.agent = _DummyAgent()
-    cli.session_id = "old-session"
+    # Same-identity session_id — skip the post-compress sync branch
+    # by reusing the default agent from build_test_shell.
+    from unittest.mock import MagicMock
+    agent = MagicMock()
+    agent.compression_enabled = True
+    agent._cached_system_prompt = ""
+    agent.tools = None
+    agent.session_id = "new-session"
+    agent._compress_context.return_value = (
+        [{"role": "user", "content": "[summary]"}], "",
+    )
+    agent._flush_messages_to_session_db = lambda *a, **k: None
+    cli.agent = agent
+    cli.session_id = "new-session"
     cli._pending_title = "old title"
+    # Bypass busy_command redraw noise.
+    from contextlib import nullcontext
     cli._busy_command = lambda _message: nullcontext()
     return cli
 
@@ -148,16 +89,15 @@ def test_manual_compress_summary_uses_cprint_not_raw_print(_cli, monkeypatch):
     Without this, ``patch_stdout`` swallows the lines and the user sees
     nothing — this is the exact regression "it's not showing the results
     of the compaction anymore".
-
-    The bare-``print()`` path is allowed only for the
-    ``Compression failed:`` exception path; ``_cprint`` is the contract
-    for success-path user-facing summaries.
     """
     capture: list[str] = []
-    _patch_cprint_on_prod_module(monkeypatch, capture)
-    _cli._manual_compress("/compress")
-    rendered = "\n".join(capture)
+    patch_cprint(monkeypatch, capture)
 
+    with patch("agent.model_metadata.estimate_request_tokens_rough",
+               return_value=1234):
+        _cli._manual_compress("/compress")
+
+    rendered = "\n".join(capture)
     assert _REAL_SUMMARY_PAYLOAD["headline"] in rendered, (
         "headline must reach the user via _cprint, not raw print(). "
         f"Got _cprint calls: {rendered!r}"
@@ -172,7 +112,7 @@ def test_manual_compress_summary_not_emitted_via_raw_print(_cli, monkeypatch):
     prompt_toolkit ``Application`` is running and is the underlying cause
     of the regression.
     """
-    _patch_cprint_on_prod_module(monkeypatch, [])
+    patch_cprint(monkeypatch, [])
 
     raw_prints: list = []
 
@@ -180,15 +120,19 @@ def test_manual_compress_summary_not_emitted_via_raw_print(_cli, monkeypatch):
         raw_prints.append((args, kwargs))
 
     monkeypatch.setattr("builtins.print", _capture_print)
-    _cli._manual_compress("/compress")
+
+    with patch("agent.model_metadata.estimate_request_tokens_rough",
+               return_value=1234):
+        _cli._manual_compress("/compress")
 
     rendered_strings = [
-        str(a[0]) if a and not isinstance(a[0], tuple) else " ".join(str(x) for x in a[0])
+        str(a[0]) if a and not isinstance(a[0], tuple)
+        else " ".join(str(x) for x in a[0])
         for a, _ in raw_prints
     ]
     full_output = "\n".join(rendered_strings)
 
-    bad_targets = [
+    bad = [
         label
         for label, payload in (
             ("headline", _REAL_SUMMARY_PAYLOAD["headline"]),
@@ -197,21 +141,20 @@ def test_manual_compress_summary_not_emitted_via_raw_print(_cli, monkeypatch):
         )
         if payload in full_output
     ]
-    assert not bad_targets, (
+    assert not bad, (
         "These user-facing summary fields were emitted via raw print() "
         f"instead of _cprint, which causes the /compress regression "
-        f"(patch_stdout swallows them): {bad_targets}. "
+        f"(patch_stdout swallows them): {bad}. "
         f"Full print() output was: {full_output!r}"
     )
 
 
 def test_manual_compress_preview_uses_cprint(_cli, monkeypatch):
-    """``/compress --preview`` and ``/compress here N`` already-success
-    paths route their user-facing lines through print() — same bug class
-    as the success summary, so pinned here together.
-    """
+    """``/compress --preview`` returns BEFORE the LLM call (no token
+    cost), so it's pure user feedback — failure to surface it makes
+    the flag look broken to the user."""
     capture: list[str] = []
-    _patch_cprint_on_prod_module(monkeypatch, capture)
+    patch_cprint(monkeypatch, capture)
 
     monkeypatch.setattr(
         "hermes_cli.partial_compress.summarize_compress_preview",

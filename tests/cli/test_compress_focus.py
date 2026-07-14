@@ -1,15 +1,24 @@
 """Tests for /compress <focus> — guided compression with focus topic.
 
 Inspired by Claude Code's /compact <focus> feature.
+
+Updated 2026-07-13: switched from raw ``print()`` + ``capsys`` to
+``_cprint`` capture (the production fix routes user-facing output
+through ``_cprint(...)``; bare ``print()`` writes get swallowed by
+``patch_stdout``'s StdoutProxy when an Application is running).
+Uses a shared ``build_test_shell`` factory instead of
+``tests.cli.test_cli_init._make_cli`` — see helper docstring for why.
 """
 
-import sys
 from unittest.mock import MagicMock, patch
 
-from tests.cli.test_cli_init import _make_cli
+from tests.cli._helpers.manual_compress_shell import (
+    build_test_shell,
+    patch_cprint,
+)
 
 
-def _make_history() -> list[dict[str, str]]:
+def _make_history():
     return [
         {"role": "user", "content": "one"},
         {"role": "assistant", "content": "two"},
@@ -18,102 +27,98 @@ def _make_history() -> list[dict[str, str]]:
     ]
 
 
-def test_focus_topic_extracted_and_passed(capsys):
+def test_focus_topic_extracted_and_passed(monkeypatch):
     """Focus topic is extracted from the command and passed to _compress_context."""
-    shell = _make_cli()
     history = _make_history()
     compressed = [history[0], history[-1]]
-    shell.conversation_history = history
-    shell.agent = MagicMock()
-    shell.agent.compression_enabled = True
-    shell.agent._cached_system_prompt = ""
-    shell.agent._compress_context.return_value = (compressed, "")
+    cli, _ = build_test_shell(agent_response=(compressed, ""))
+    cli.conversation_history = history
+
+    cprinted: list[str] = []
+    patch_cprint(monkeypatch, cprinted)
 
     def _estimate(messages):
-        if messages is history:
-            return 100
-        return 50
+        # The agent under test returns ``compressed`` while the
+        # ``messages`` it gets back is the original (list-wrapped)
+        # history; we recognise each form and return appropriate tokens.
+        if messages == compressed:
+            return 50
+        return 100
 
-    with patch("agent.model_metadata.estimate_messages_tokens_rough", side_effect=_estimate):
-        shell._manual_compress("/compress database schema")
+    with patch("agent.model_metadata.estimate_messages_tokens_rough",
+               side_effect=_estimate):
+        cli._manual_compress("/compress database schema")
 
-    output = capsys.readouterr().out
-    assert 'focus: "database schema"' in output
+    rendered = "\n".join(cprinted)
+    assert 'focus: "database schema"' in rendered
 
-    # Verify focus_topic was passed through
-    shell.agent._compress_context.assert_called_once()
-    call_kwargs = shell.agent._compress_context.call_args
+    cli.agent._compress_context.assert_called_once()
+    call_kwargs = cli.agent._compress_context.call_args
     assert call_kwargs.kwargs.get("focus_topic") == "database schema"
 
 
-def test_no_focus_topic_when_bare_command(capsys):
+def test_no_focus_topic_when_bare_command(monkeypatch):
     """When no focus topic is provided, None is passed."""
-    shell = _make_cli()
     history = _make_history()
-    shell.conversation_history = history
-    shell.agent = MagicMock()
-    shell.agent.compression_enabled = True
-    shell.agent._cached_system_prompt = ""
-    shell.agent._compress_context.return_value = (list(history), "")
+    cli, _ = build_test_shell(agent_response=(list(history), ""))
+    cli.conversation_history = history
 
-    with patch("agent.model_metadata.estimate_messages_tokens_rough", return_value=100):
-        shell._manual_compress("/compress")
+    with patch("agent.model_metadata.estimate_messages_tokens_rough",
+               return_value=100):
+        cli._manual_compress("/compress")
 
-    shell.agent._compress_context.assert_called_once()
-    call_kwargs = shell.agent._compress_context.call_args
+    cli.agent._compress_context.assert_called_once()
+    call_kwargs = cli.agent._compress_context.call_args
     assert call_kwargs.kwargs.get("focus_topic") is None
 
 
-def test_empty_focus_after_command_treated_as_none(capsys):
+def test_empty_focus_after_command_treated_as_none(monkeypatch):
     """Trailing whitespace after /compress does not produce a focus topic."""
-    shell = _make_cli()
     history = _make_history()
-    shell.conversation_history = history
-    shell.agent = MagicMock()
-    shell.agent.compression_enabled = True
-    shell.agent._cached_system_prompt = ""
-    shell.agent._compress_context.return_value = (list(history), "")
+    cli, _ = build_test_shell(agent_response=(list(history), ""))
+    cli.conversation_history = history
 
-    with patch("agent.model_metadata.estimate_messages_tokens_rough", return_value=100):
-        shell._manual_compress("/compress   ")
+    with patch("agent.model_metadata.estimate_messages_tokens_rough",
+               return_value=100):
+        cli._manual_compress("/compress   ")
 
-    shell.agent._compress_context.assert_called_once()
-    call_kwargs = shell.agent._compress_context.call_args
+    cli.agent._compress_context.assert_called_once()
+    call_kwargs = cli.agent._compress_context.call_args
     assert call_kwargs.kwargs.get("focus_topic") is None
 
 
-def test_focus_topic_printed_in_compression_banner(capsys):
+def test_focus_topic_printed_in_compression_banner(monkeypatch):
     """The focus topic shows in the compression progress banner."""
-    shell = _make_cli()
     history = _make_history()
     compressed = [history[0], history[-1]]
-    shell.conversation_history = history
-    shell.agent = MagicMock()
-    shell.agent.compression_enabled = True
-    shell.agent._cached_system_prompt = ""
-    shell.agent._compress_context.return_value = (compressed, "")
+    cli, _ = build_test_shell(agent_response=(compressed, ""))
+    cli.conversation_history = history
 
-    with patch("agent.model_metadata.estimate_messages_tokens_rough", return_value=100):
-        shell._manual_compress("/compress API endpoints")
+    cprinted: list[str] = []
+    patch_cprint(monkeypatch, cprinted)
 
-    output = capsys.readouterr().out
-    assert 'focus: "API endpoints"' in output
+    with patch("agent.model_metadata.estimate_messages_tokens_rough",
+               return_value=100):
+        cli._manual_compress("/compress API endpoints")
+
+    rendered = "\n".join(cprinted)
+    assert 'focus: "API endpoints"' in rendered
 
 
-def test_no_focus_prints_standard_banner(capsys):
+def test_no_focus_prints_standard_banner(monkeypatch):
     """Without focus, the standard banner (no focus: line) is printed."""
-    shell = _make_cli()
     history = _make_history()
     compressed = [history[0], history[-1]]
-    shell.conversation_history = history
-    shell.agent = MagicMock()
-    shell.agent.compression_enabled = True
-    shell.agent._cached_system_prompt = ""
-    shell.agent._compress_context.return_value = (compressed, "")
+    cli, _ = build_test_shell(agent_response=(compressed, ""))
+    cli.conversation_history = history
 
-    with patch("agent.model_metadata.estimate_messages_tokens_rough", return_value=100):
-        shell._manual_compress("/compress")
+    cprinted: list[str] = []
+    patch_cprint(monkeypatch, cprinted)
 
-    output = capsys.readouterr().out
-    assert "focus:" not in output
-    assert "Compressing" in output
+    with patch("agent.model_metadata.estimate_messages_tokens_rough",
+               return_value=100):
+        cli._manual_compress("/compress")
+
+    rendered = "\n".join(cprinted)
+    assert "focus:" not in rendered
+    assert "Compressing" in rendered
