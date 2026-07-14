@@ -37,17 +37,27 @@ class MiniMaxProfile(ProviderProfile):
         base_url: str | None = None,
         **context: Any,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
-        """Emit M3 reasoning controls for api.minimax.io/v1.
+        """Emit M3 thinking-mode controls for api.minimax.io/v1.
 
-        MiniMax-M3's OpenAI-compatible endpoint keeps thinking inline unless
-        ``reasoning_split`` is sent, so always request the split format on that
-        route. ``thinking`` controls the M3 mode; Hermes' effort levels are not
-        a MiniMax depth knob here, so they only select adaptive vs disabled.
+        M3's OpenAI-compatible endpoint keeps chain-of-thought inline in
+        the streamed content (wrapped in ``<think>…</think>``) unless
+        ``reasoning_split`` is sent — and Hermes' frontend reasoning
+        extractor (``ui-tui/src/lib/reasoning.ts::splitReasoning``) is
+        designed around that inline shape. Sending ``reasoning_split: true``
+        routes the reasoning into a separate response field whose name
+        does not match the ``delta.reasoning_content`` / ``delta.reasoning``
+        accumulator in ``agent/chat_completion_helpers.py:2028``, so the
+        reasoning is silently dropped on the wire and the user sees an
+        empty ``ToolTrail`` above an otherwise complete answer.
+
+        ``thinking`` controls the M3 mode itself (``adaptive`` enables it,
+        ``disabled`` turns it off). Hermes' effort levels are not a MiniMax
+        depth knob here — they only select adaptive vs disabled.
         """
         if not _is_minimax_global_openai_base_url(base_url) or not _is_minimax_m3(model):
             return {}, {}
 
-        extra_body: dict[str, Any] = {"reasoning_split": True}
+        extra_body: dict[str, Any] = {}
 
         if isinstance(reasoning_config, dict) and reasoning_config.get("enabled") is False:
             extra_body["thinking"] = {"type": "disabled"}

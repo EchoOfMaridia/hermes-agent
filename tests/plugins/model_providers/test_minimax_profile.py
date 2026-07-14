@@ -121,9 +121,23 @@ class TestMinimaxAuxModelNotHighspeed:
 
 
 class TestMinimaxM3OpenAIReasoningWireShape:
-    """MiniMax-M3 on api.minimax.io/v1 gets MiniMax's OpenAI-compatible knobs."""
+    """MiniMax-M3 on api.minimax.io/v1 gets MiniMax's OpenAI-compatible knobs.
 
-    def test_m3_openai_route_requests_reasoning_split_by_default(self):
+    The ``thinking`` knob stays — it controls whether M3 thinks at all
+    (``type: adaptive`` enables it, ``type: disabled`` turns it off). The
+    ``reasoning_split`` knob is intentionally ABSENT: Hermes' frontend
+    reasoning extractor (``ui-tui/src/lib/reasoning.ts::splitReasoning``)
+    pulls ``<think>…</think>`` blocks out of the streamed content. When the
+    MiniMax OpenAI endpoint receives ``reasoning_split: true``, it moves the
+    chain-of-thought into a separate response field whose name does not
+    match the ``delta.reasoning_content`` / ``delta.reasoning`` accumulator
+    in ``agent/chat_completion_helpers.py:2028`` — so reasoning is silently
+    dropped on the wire and the user sees an empty ``ToolTrail`` above an
+    otherwise complete answer. Keeping reasoning inline (the default when
+    ``reasoning_split`` is omitted) lets the TUI extract it correctly.
+    """
+
+    def test_m3_openai_route_keeps_thinking_inline_no_reasoning_split(self):
         import model_tools  # noqa: F401
         import providers
 
@@ -134,7 +148,15 @@ class TestMinimaxM3OpenAIReasoningWireShape:
             model="MiniMax-M3",
             base_url="https://api.minimax.io/v1",
         )
-        assert extra_body == {"reasoning_split": True}
+        # No reasoning_split — MiniMax returns <think>…</think> inline so the
+        # frontend's splitReasoning can extract it.
+        assert "reasoning_split" not in extra_body, (
+            "reasoning_split=True routes MiniMax-M3 reasoning into a separate "
+            "response field that Hermes' streaming accumulator ("
+            "agent/chat_completion_helpers.py:2028) does not recognize. "
+            "Reasoning disappears from the user-visible ToolTrail."
+        )
+        assert extra_body == {}
         assert top_level == {}
 
     def test_m3_openai_route_maps_explicit_effort_to_adaptive_only(self):
@@ -148,10 +170,9 @@ class TestMinimaxM3OpenAIReasoningWireShape:
             model="MiniMax-M3",
             base_url="https://api.minimax.io/v1",
         )
-        assert extra_body == {
-            "reasoning_split": True,
-            "thinking": {"type": "adaptive"},
-        }
+        # thinking stays — it gates the model's reasoning mode itself.
+        # reasoning_split stays absent — see test_m3_openai_route_keeps_thinking_inline_no_reasoning_split.
+        assert extra_body == {"thinking": {"type": "adaptive"}}
         assert top_level == {}
 
     def test_m3_openai_route_does_not_send_reasoning_effort(self):
@@ -165,10 +186,12 @@ class TestMinimaxM3OpenAIReasoningWireShape:
             model="MiniMax-M3",
             base_url="https://api.minimax.io/v1/",
         )
-        assert extra_body == {
-            "reasoning_split": True,
-            "thinking": {"type": "adaptive"},
-        }
+        # Hermes' effort levels (low/medium/high/xhigh) are not a MiniMax depth
+        # knob — they only select adaptive vs disabled. Hermes' own effort
+        # value must not leak into the wire payload.
+        assert "reasoning_effort" not in extra_body
+        assert "reasoning_effort" not in _top_level
+        assert extra_body == {"thinking": {"type": "adaptive"}}
 
     def test_m3_openai_route_can_disable_thinking(self):
         import model_tools  # noqa: F401
@@ -181,10 +204,8 @@ class TestMinimaxM3OpenAIReasoningWireShape:
             model="MiniMax-M3",
             base_url="https://api.minimax.io/v1",
         )
-        assert extra_body == {
-            "reasoning_split": True,
-            "thinking": {"type": "disabled"},
-        }
+        assert "reasoning_split" not in extra_body
+        assert extra_body == {"thinking": {"type": "disabled"}}
         assert top_level == {}
 
     @pytest.mark.parametrize(
@@ -226,7 +247,17 @@ class TestMinimaxM3OpenAIReasoningWireShape:
             reasoning_config={"enabled": True, "effort": "medium"},
             base_url="https://api.minimax.io/v1",
         )
-        assert kwargs["extra_body"] == {
-            "reasoning_split": True,
-            "thinking": {"type": "adaptive"},
-        }
+        # reasoning_split is intentionally absent — see
+        # test_m3_openai_route_keeps_thinking_inline_no_reasoning_split.
+        # The transport must thread the profile's extra_body through
+        # unchanged, so the contract holds end-to-end. With the M3
+        # thinking knob alone, ``extra_body`` is {thinking: {...}} and
+        # stays attached to api_kwargs; with neither knob, the transport
+        # omits the key entirely (truthy-gate at chat_completions.py:448).
+        extra_body = kwargs.get("extra_body") or {}
+        assert "reasoning_split" not in extra_body, (
+            "reasoning_split=True routes MiniMax-M3 reasoning into a separate "
+            "response field that Hermes' streaming accumulator does not "
+            "recognize. Reasoning disappears from the user-visible ToolTrail."
+        )
+        assert extra_body == {"thinking": {"type": "adaptive"}}

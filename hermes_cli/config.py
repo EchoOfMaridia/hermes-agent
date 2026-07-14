@@ -6457,6 +6457,32 @@ def get_env_value(key: str) -> Optional[str]:
     return env_vars.get(key)
 
 
+def get_env_value_prefer_dotenv(key: str) -> Optional[str]:
+    """Resolve a credential env value, preferring ``~/.hermes/.env`` over ``os.environ``.
+
+    Used for Hermes-managed credentials where a deliberate edit to ``.env``
+    must take precedence over a stale value inherited from the parent shell
+    (Codex CLI, test scripts, login profile exports). Without this, rotating
+    a key in ``.env`` mid-session leaves callers serving the stale shell
+    value and produces persistent 401s.
+
+    The ``os.environ`` fallback routes through ``secret_scope.get_secret`` so
+    that, under an active profile scope (multiplexed gateway turn), this read
+    is scope-checked rather than leaking another profile's raw ``os.environ``
+    value — matching the credential-pool seeding path's behaviour.
+    """
+    env_vars = load_env()
+    value = env_vars.get(key)
+    if value:
+        return value
+    try:
+        from agent.secret_scope import get_secret
+
+        return get_secret(key)
+    except Exception:
+        return os.environ.get(key)
+
+
 # =============================================================================
 # Config display
 # =============================================================================

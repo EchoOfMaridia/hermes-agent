@@ -531,6 +531,15 @@ class ChatCompletionsTransport(ProviderTransport):
                 supports_reasoning=params.get("supports_reasoning", False),
                 qwen_session_metadata=params.get("qwen_session_metadata"),
                 model=model,
+                # base_url is the gating key for endpoint-specific reasoning
+                # controls (e.g. MiniMax-M3's OpenAI-compatible route emits
+                # ``thinking: {type: adaptive}`` only on api.minimax.io/v1).
+                # Without it, the provider returns ({}, {}) and the model
+                # never sees the thinking-mode wire shape — so its reasoning
+                # comes back in a stream shape that doesn't match Hermes'
+                # frontend splitReasoning extractor, and the reasoning block
+                # silently disappears from the user-visible ToolTrail.
+                base_url=params.get("base_url"),
                 ollama_num_ctx=params.get("ollama_num_ctx"),
                 session_id=params.get("session_id"),
             )
