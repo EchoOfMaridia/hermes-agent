@@ -116,15 +116,18 @@ class TestReasoningEmittedWhenStreamBoxClosed:
 
         cli._stream_reasoning_delta("fresh thought\n")
 
-        # New contract: reasoning text is buffered for the finalizer to
-        # render AFTER the response. The live reasoning box does NOT open.
-        assert cli._reasoning_box_opened is False, (
-            "Reasoning box should NOT open live — reasoning is buffered "
-            "for after-response rendering."
+        # Live reasoning contract: reasoning box opens immediately on
+        # the first reasoning token so the user sees the chain-of-thought
+        # render in real time, ABOVE the (not-yet-opened) response panel.
+        assert cli._reasoning_box_opened is True, (
+            "Reasoning box should open LIVE on the first reasoning token. "
+            "The deferred-render path (the cherry-pick) hides the chain-of-"
+            "thought until AFTER the response — that inverts the temporal "
+            "order the user expects to read. See "
+            "docs/maestro/transcripts/2026-07-13-rev-reasoning-fix-tmux.txt "
+            "for the live symptom of that inversion."
         )
         assert cli._stream_box_opened is False
-        # The reasoning text is in the per-turn buffer.
-        assert "fresh thought" in getattr(cli, "_reasoning_buffered_for_after_response", "")
 
 
 # ── Test 2: between-turn reset invariants ─────────────────────────────────────

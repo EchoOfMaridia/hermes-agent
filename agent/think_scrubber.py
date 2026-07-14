@@ -56,9 +56,12 @@ intentional, bounded construct.
 
 from __future__ import annotations
 
-from typing import Tuple
+from typing import Callable, Optional, Tuple
 
 __all__ = ["StreamingThinkScrubber"]
+
+
+ReasoningCallback = Callable[[str], None]
 
 
 class StreamingThinkScrubber:
@@ -66,7 +69,9 @@ class StreamingThinkScrubber:
 
     State machine:
       - ``_in_block``: True while inside an opened block, waiting for
-        a close tag.  All text inside is discarded.
+        a close tag.  All text inside is discarded (unless a reasoning
+        callback is registered, in which case the inner text is
+        surfaced via the callback when the block closes — see below).
       - ``_buf``: held-back partial-tag tail.  Emitted / discarded on
         the next ``feed()`` call or by ``flush()``.
       - ``_last_emitted_ended_newline``: True iff the most recent
@@ -74,6 +79,30 @@ class StreamingThinkScrubber:
         been emitted yet (start-of-stream counts as a boundary).  Used
         to decide whether an open tag at buffer position 0 is at a
         block boundary.
+
+    Optional reasoning extraction
+    ------------------------------
+    Some providers (notably MiniMax-M3 on api.minimax.io/v1 with
+    ``thinking: {type: adaptive}``) emit reasoning INLINE in the
+    streamed ``content`` field as ``<think>...</think>`` blocks rather
+    than in a separate ``reasoning_content`` field.  When the model's
+    reasoning lives inline, downstream consumers that expect reasoning
+    on a separate channel (desktop's ``reasoning.delta`` events, the
+    CLI's reasoning box, the TUI's reasoning row) receive nothing,
+    because the per-delta regex strip in this scrubber silently
+    discards the ``<think>…</think>`` body before any consumer sees it.
+
+    Pass ``on_reasoning_extracted`` to either ``feed()`` (per-call) or
+    ``__init__`` (instance-wide) and the inner content of every CLOSED
+    ``<tag>…</tag>`` pair is surfaced through the callback instead of
+    being silently thrown away.  The callback is called with the raw
+    inner text — no trimming, no formatting — once per closed block.
+
+    Unterminated blocks (open tag arrives but no close tag ever does)
+    are still dropped on ``flush()`` because partial reasoning is less
+    useful than no reasoning and the original "leaking partial
+    reasoning is worse than a truncated answer" invariant holds.
+    Callbacks are NOT fired for unterminated blocks.
     """
 
     _OPEN_TAG_NAMES: Tuple[str, ...] = (
@@ -92,16 +121,96 @@ class StreamingThinkScrubber:
     # Pre-compute the longest tag (for partial-tag hold-back bound).
     _MAX_TAG_LEN: int = max(len(tag) for tag in _OPEN_TAGS + _CLOSE_TAGS)
 
-    def __init__(self) -> None:
+    def __init__(self, on_reasoning_extracted: Optional[ReasoningCallback] = None) -> None:
         self._in_block: bool = False
         self._buf: str = ""
+        # Accumulator for the inner content of an open reasoning block
+        # when the open tag and its close tag arrive in SEPARATE deltas
+        # (MiniMax-M3 emits ``<think>`` alone, then the body, then
+        # ``</think>`` as three distinct SSE chunks).  Without this
+        # accumulator the body would be silently discarded between
+        # feeds — there is nowhere else for it to live: ``_buf`` is
+        # reserved for partial-tag hold-back at the END of the buffer
+        # and is reset on every ``feed()`` call.  Fires once via the
+        # callback when the matching close tag is finally seen, then
+        # resets.
+        self._in_block_text: str = ""
+        # Per-feed extracted reasoning list, populated by ``feed()``
+        # (one entry per closed ``<tag>…</tag>`` pair found in the
+        # current delta) and exposed via ``drain_extracted_reasoning``
+        # so callers (notably ``_fire_stream_delta``) can re-merge the
+        # extracted reasoning into their own accumulator without
+        # having to instrument the callback.  Cleared by every
+        # ``feed()`` so the caller sees only reasoning extracted in
+        # THIS feed, not stale reasoning from a previous delta.
+        self._last_extracted: list[str] = []
         self._last_emitted_ended_newline: bool = True
+        self._on_reasoning_extracted: Optional[ReasoningCallback] = (
+            on_reasoning_extracted
+        )
+
+    def set_reasoning_extracted_callback(
+        self, callback: Optional[ReasoningCallback]
+    ) -> None:
+        """Install (or clear) the per-instance reasoning-extraction callback.
+
+        Equivalent to passing ``on_reasoning_extracted`` to ``__init__``
+        but useful when the callback target isn't known at construction
+        time (e.g. wiring ``agent._fire_reasoning_delta`` after the
+        scrubber is already instantiated).
+        """
+        self._on_reasoning_extracted = callback
 
     def reset(self) -> None:
-        """Reset all state.  Call at the top of every new turn."""
+        """Reset all state.  Call at the top of every new turn.
+
+        The reasoning callback is preserved across ``reset()`` so it
+        only needs to be installed once per agent lifetime.
+        """
         self._in_block = False
         self._buf = ""
+        self._in_block_text = ""
+        self._last_extracted = []
         self._last_emitted_ended_newline = True
+
+    def _fire_extracted(self, text: str) -> None:
+        """Surface extracted reasoning text to the registered callback.
+
+        Also records the extraction in ``_last_extracted`` so callers
+        that need to re-merge the reasoning into their own
+        accumulator (e.g. the streaming accumulator's
+        ``reasoning_parts`` list) can do so without instrumenting the
+        callback.
+
+        Swallows exceptions from the callback — a misbehaving
+        consumer must not corrupt the scrubber's state machine or
+        block the visible-text stream from advancing.
+        """
+        if not text:
+            return
+        self._last_extracted.append(text)
+        if self._on_reasoning_extracted is None:
+            return
+        try:
+            self._on_reasoning_extracted(text)
+        except Exception:
+            pass
+
+    def drain_extracted_reasoning(self) -> list[str]:
+        """Return and clear the per-feed extracted reasoning list.
+
+        Each ``feed()`` call resets ``_last_extracted`` on entry and
+        populates it as closed ``<tag>…</tag>`` pairs are matched.
+        This method returns the current list and atomically replaces
+        it with an empty list so subsequent ``feed()`` calls start
+        fresh.  Callers that want to merge the extracted reasoning
+        into their own per-turn accumulator (e.g.
+        ``chat_completion_helpers.reasoning_parts``) should drain
+        after every ``feed()`` call.
+        """
+        out = self._last_extracted
+        self._last_extracted = []
+        return out
 
     def feed(self, text: str) -> str:
         """Feed one delta; return the scrubbed visible portion.
@@ -109,7 +218,18 @@ class StreamingThinkScrubber:
         May return an empty string when the entire delta is reasoning
         content or is being held back pending resolution of a partial
         tag at the boundary.
+
+        Side-effect: ``_last_extracted`` is RESET on entry and then
+        populated with one entry per closed ``<tag>…</tag>`` pair
+        found inside ``text``.  Drain it via
+        ``drain_extracted_reasoning()`` to merge the reasoning back
+        into a downstream accumulator (e.g. the streaming
+        accumulator's ``reasoning_parts`` list, which is the source of
+        the post-turn ``msg["reasoning_content"]`` field).
         """
+        # Per-feed clear so the caller never sees stale reasoning from
+        # an earlier delta.
+        self._last_extracted = []
         if not text:
             return ""
         buf = self._buf + text
@@ -123,12 +243,29 @@ class StreamingThinkScrubber:
                     buf, self._CLOSE_TAGS,
                 )
                 if close_idx == -1:
-                    # No close yet — hold back a potential partial
-                    # close-tag prefix; discard everything else.
+                    # No close yet — accumulate the body into
+                    # ``_in_block_text`` so the reasoning callback
+                    # receives it once the close tag arrives, then
+                    # hold back a potential partial close-tag prefix
+                    # and discard everything else.
                     held = self._max_partial_suffix(buf, self._CLOSE_TAGS)
+                    body_end = len(buf) - (held or 0)
+                    if body_end > 0:
+                        self._in_block_text += buf[:body_end]
                     self._buf = buf[-held:] if held else ""
                     return "".join(out)
-                # Found close: discard block content + tag, continue.
+                # Found close: surface accumulated body + current
+                # pre-close slice to the reasoning callback (when one
+                # is registered) so providers that emit reasoning INLINE
+                # in the content stream — MiniMax-M3 with
+                # ``thinking=adaptive`` is the canonical case — don't
+                # have their chain-of-thought silently discarded before
+                # the downstream reasoning channel (desktop's
+                # reasoning.delta, CLI's reasoning box, TUI's reasoning
+                # row) can see it.  Then discard block content + tag and
+                # continue.
+                self._fire_extracted(self._in_block_text + buf[:close_idx])
+                self._in_block_text = ""
                 buf = buf[close_idx + close_len:]
                 self._in_block = False
             else:
@@ -158,6 +295,14 @@ class StreamingThinkScrubber:
                             self._last_emitted_ended_newline = (
                                 preceding.endswith("\n")
                             )
+                    # Surface the closed-block inner content (the reasoning
+                    # body) to the reasoning callback so inline-reasoning
+                    # providers get their chain-of-thought routed to the
+                    # reasoning channel before the rest of the buffer is
+                    # dropped.  Without this the closed-pair case silently
+                    # throws away exactly the text that downstream
+                    # consumers want to display.
+                    self._fire_extracted(self._extract_closed_pair_inner(buf, start_idx, end_idx))
                     buf = buf[end_idx:]
                     continue
 
@@ -384,3 +529,41 @@ class StreamingThinkScrubber:
                 out.append(text[i])
                 i += 1
         return "".join(out)
+
+    def _extract_closed_pair_inner(
+        self, buf: str, start_idx: int, end_idx: int,
+    ) -> str:
+        """Return the inner content of a closed ``<tag>X</tag>`` pair.
+
+        ``start_idx`` and ``end_idx`` come from ``_find_earliest_closed_pair``
+        and bracket the entire pair (open tag + body + close tag).  This
+        helper strips the literal open/close tag wrappers from the slice
+        and returns the body that lives between them.
+
+        Matching is case-insensitive and tolerates tag variants (``<think>``
+        vs ``<THINK>``) by lowercasing the candidate slice.  The original
+        ``buf`` slice preserves the inner text's original case so the
+        reasoning callback receives the model's actual output.
+        """
+        pair_slice = buf[start_idx:end_idx]
+        lower = pair_slice.lower()
+        # Find the open tag — exact prefix match against any variant.
+        open_len = 0
+        for tag in self._OPEN_TAGS:
+            tag_lower = tag.lower()
+            tag_len = len(tag_lower)
+            if lower.startswith(tag_lower) and tag_len > open_len:
+                open_len = tag_len
+        # Find the close tag — exact suffix match against any variant.
+        close_len = 0
+        for tag in self._CLOSE_TAGS:
+            tag_lower = tag.lower()
+            tag_len = len(tag_lower)
+            if lower.endswith(tag_lower) and tag_len > close_len:
+                close_len = tag_len
+        if open_len == 0 or close_len == 0:
+            # Should not happen — _find_earliest_closed_pair already
+            # verified the structure.  Defensive: return empty so the
+            # callback fires with no text instead of misfiring.
+            return ""
+        return pair_slice[open_len : len(pair_slice) - close_len]

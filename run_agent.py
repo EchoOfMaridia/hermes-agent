@@ -4689,8 +4689,21 @@ class AIAgent:
         except Exception:
             logger.debug("interim_assistant_callback error", exc_info=True)
 
-    def _fire_stream_delta(self, text: str) -> None:
-        """Fire all registered stream delta callbacks (display + TTS)."""
+    def _fire_stream_delta(self, text: str) -> Optional[str]:
+        """Fire all registered stream delta callbacks (display + TTS).
+
+        Returns the reasoning text extracted from ``text`` by the
+        think-scrubber (one concatenated string per closed ``<tag>…</tag>``
+        pair) so the streaming accumulator can re-merge it into
+        ``reasoning_parts`` for the post-turn ``reasoning_content``
+        field.  Returns ``None`` when no reasoning was extracted (or
+        when the think-scrubber is missing — defensive legacy path).
+
+        Pre-existing callers that ignore the return value are
+        unaffected: this method has always returned ``None``; the
+        return type is widened to ``Optional[str]`` and the new
+        return value is purely additive.
+        """
         # If a tool iteration set the break flag, prepend a single paragraph
         # break before the first real text delta.  This prevents the original
         # problem (text concatenation across tool boundaries) without stacking
@@ -4701,6 +4714,17 @@ class AIAgent:
             prepended_break = True
         else:
             prepended_break = False
+        # Capture extracted reasoning BEFORE think_scrubber.feed() drains
+        # _last_extracted inside its own bookkeeping.  The scrubber fires
+        # the registered callback (which calls _fire_reasoning_delta) AND
+        # appends each extracted chunk to its internal _last_extracted
+        # list.  We drain that list after the call so the streaming
+        # accumulator at chat_completion_helpers.py:2039 can re-merge the
+        # reasoning into reasoning_parts for the post-turn
+        # ``msg["reasoning_content"]`` field — otherwise the reasoning
+        # would vanish from non-streaming consumers even though the live
+        # reasoning_callback fired correctly.
+        think_scrubber = getattr(self, "_stream_think_scrubber", None)
         if isinstance(text, str):
             # Suppress reasoning/thinking blocks via the stateful
             # scrubber (#17924).  Earlier versions ran _strip_think_blocks
@@ -4710,12 +4734,21 @@ class AIAgent:
             # regex case 2 erased the first delta, so the CLI/gateway
             # state machine never saw the open tag and leaked the
             # reasoning content as regular response text).
-            think_scrubber = getattr(self, "_stream_think_scrubber", None)
             if think_scrubber is not None:
                 text = think_scrubber.feed(text or "")
+                # Re-merge any inline-reasoning extracted from this delta
+                # so the assembled ``msg["reasoning_content"]`` reflects
+                # the full chain-of-thought, not just the live-streamed
+                # events.  drain_extracted_reasoning() returns AND clears
+                # the per-feed list, so calling it once after feed() is
+                # the only safe spot.
+                extracted: list[str] = (
+                    think_scrubber.drain_extracted_reasoning()
+                )
             else:
                 # Defensive: legacy callers without the scrubber attribute.
                 text = self._strip_think_blocks(text or "")
+                extracted = []
             # Then feed through the stateful context scrubber so memory-context
             # spans split across chunks cannot leak to the UI (#5719).
             scrubber = getattr(self, "_stream_context_scrubber", None)
@@ -4729,18 +4762,26 @@ class AIAgent:
                 self, "_current_streamed_assistant_text", ""
             ):
                 text = text.lstrip("\n")
-        if not text:
-            return
-        callbacks = [cb for cb in (self.stream_delta_callback, self._stream_callback) if cb is not None]
-        delivered = False
-        for cb in callbacks:
-            try:
-                cb(text)
-                delivered = True
-            except Exception:
-                pass
-        if delivered:
-            self._record_streamed_assistant_text(text)
+        else:
+            extracted = []
+        if text:
+            callbacks = [cb for cb in (self.stream_delta_callback, self._stream_callback) if cb is not None]
+            delivered = False
+            for cb in callbacks:
+                try:
+                    cb(text)
+                    delivered = True
+                except Exception:
+                    pass
+            if delivered:
+                self._record_streamed_assistant_text(text)
+        # Return concatenated extracted reasoning so the accumulator can
+        # append it to its own reasoning_parts list.  ``None`` when
+        # nothing was extracted — matches the pre-fix return contract
+        # for callers that ignored the return value.
+        if not extracted:
+            return None
+        return "".join(extracted)
 
     def _fire_reasoning_delta(self, text: str) -> None:
         """Fire reasoning callback if registered."""

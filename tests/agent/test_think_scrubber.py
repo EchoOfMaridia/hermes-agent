@@ -227,3 +227,197 @@ class TestRealisticStreaming:
         s = StreamingThinkScrubber()
         deltas = ["Hello ", "world ", "how ", "are ", "you?"]
         assert _drive(s, deltas) == "Hello world how are you?"
+
+
+class TestReasoningExtractionCallback:
+    """Reasoning extracted from closed ``<tag>…</tag>`` blocks must reach the callback.
+
+    Without this callback the scrubber silently discards ``<think>…</think>``
+    inner content — which is fine for non-reasoning providers, but for
+    providers that emit reasoning INLINE in the streamed ``content`` field
+    (MiniMax-M3 on api.minimax.io/v1 with ``thinking: {type: adaptive}``)
+    the chain-of-thought disappears before the reasoning channel ever
+    fires.  These tests lock in the callback contract so the
+    desktop/CLI/TUI reasoning surface keeps working.
+    """
+
+    def test_closed_pair_fires_callback_with_inner_content(self) -> None:
+        extracted: list[str] = []
+        s = StreamingThinkScrubber(on_reasoning_extracted=extracted.append)
+        s.feed("<think>let me think</think>Hello")
+        assert extracted == ["let me think"]
+        assert s.flush() == ""  # flush() of finished block emits nothing
+
+    def test_all_tag_variants_extract_inner(self) -> None:
+        for tag in ("think", "thinking", "reasoning", "thought", "REASONING_SCRATCHPAD"):
+            extracted: list[str] = []
+            s = StreamingThinkScrubber(on_reasoning_extracted=extracted.append)
+            visible = s.feed(f"<{tag}>chain of thought</{tag}>visible text")
+            assert extracted == ["chain of thought"], tag
+            assert visible == "visible text", tag
+            assert s.flush() == "", tag
+
+    def test_multiple_blocks_each_fire_callback(self) -> None:
+        extracted: list[str] = []
+        s = StreamingThinkScrubber(on_reasoning_extracted=extracted.append)
+        visible = s.feed("<think>first</think> middle <think>second</think> end")
+        assert extracted == ["first", "second"]
+        assert visible == " middle  end"
+        assert s.flush() == ""
+
+    def test_mid_prose_closed_pair_extracts(self) -> None:
+        """Closed pairs anywhere in the buffer extract, no boundary check."""
+        extracted: list[str] = []
+        s = StreamingThinkScrubber(on_reasoning_extracted=extracted.append)
+        visible = s.feed("Hello<think>reasoning here</think> world")
+        assert extracted == ["reasoning here"]
+        assert visible == "Hello world"
+
+    def test_case_insensitive_closed_pair_extracts(self) -> None:
+        extracted: list[str] = []
+        s = StreamingThinkScrubber(on_reasoning_extracted=extracted.append)
+        visible = s.feed("<THINK>mixed case</Think>hello")
+        assert extracted == ["mixed case"]
+        assert visible == "hello"
+
+    def test_split_across_deltas_closed_pair_extracts_complete(self) -> None:
+        """Char-by-char streaming of a closed pair must deliver the FULL inner text."""
+        extracted: list[str] = []
+        s = StreamingThinkScrubber(on_reasoning_extracted=extracted.append)
+        s.feed("<")
+        s.feed("thin")
+        s.feed("k>the reasoning</thin")
+        s.feed("k>visible")
+        assert extracted == ["the reasoning"]
+        assert s.flush() == ""  # no held-back tail once block resolves
+
+    def test_unterminated_block_does_not_fire_callback(self) -> None:
+        """Open tag without a matching close tag is dropped, NOT extracted.
+
+        Unterminated reasoning is partial and unreliable; leaking it
+        through the reasoning channel is worse than losing it.
+        """
+        extracted: list[str] = []
+        s = StreamingThinkScrubber(on_reasoning_extracted=extracted.append)
+        s.feed("<think>partial reasoning without close")
+        assert extracted == []
+        assert s.flush() == ""
+
+    def test_no_callback_registered_does_not_break_visible_text(self) -> None:
+        """Backward-compat: scrubber constructed without callback still works."""
+        s = StreamingThinkScrubber()
+        assert _drive(s, ["<think>reasoning</think>hello"]) == "hello"
+
+    def test_callback_exception_does_not_break_visible_stream(self) -> None:
+        """A misbehaving callback must not corrupt the state machine."""
+        def bad_callback(_text: str) -> None:
+            raise RuntimeError("consumer bug")
+
+        s = StreamingThinkScrubber(on_reasoning_extracted=bad_callback)
+        # Visible text must still come through cleanly.
+        assert _drive(s, ["<think>hello</think>world"]) == "world"
+
+    def test_set_reasoning_extracted_callback_installs_late(self) -> None:
+        """The callback can be installed after construction via setter."""
+        extracted: list[str] = []
+        s = StreamingThinkScrubber()
+        # No callback yet — first feed swallows the reasoning but the
+        # visible "A" still surfaces.
+        first_visible = s.feed("<think>first</think>A")
+        assert extracted == []
+        assert first_visible == "A"
+        # Install callback mid-stream — second feed routes extraction.
+        s.set_reasoning_extracted_callback(extracted.append)
+        second_visible = s.feed("<think>second</think>B")
+        assert extracted == ["second"]
+        assert second_visible == "B"
+        # Neither feed leaves a held-back partial-tag tail, so flush is empty.
+        assert s.flush() == ""
+
+    def test_reset_preserves_callback(self) -> None:
+        """reset() clears per-turn state but keeps the callback wired."""
+        extracted: list[str] = []
+        s = StreamingThinkScrubber(on_reasoning_extracted=extracted.append)
+        s.feed("<think>turn one</think>hi")
+        s.reset()
+        s.feed("<think>turn two</think>bye")
+        assert extracted == ["turn one", "turn two"]
+
+    def test_minimax_three_chunk_split_extraction(self) -> None:
+        """Reproduces the MiniMax-M3 wire shape: open tag, body, close tag as separate deltas.
+
+        The MiniMax API returns reasoning in three separate SSE chunks:
+        ``"<think>"`` then ``"reasoning body"`` then ``"</think>\\n\\n4"``.
+        The reasoning callback must fire once with the full body, and the
+        trailing ``\\n\\n4`` text must surface as visible stream output.
+        """
+        extracted: list[str] = []
+        s = StreamingThinkScrubber(on_reasoning_extracted=extracted.append)
+        s.feed("<think>")
+        assert extracted == []
+        s.feed("The user is asking a simple math question.")
+        assert extracted == []
+        # The third chunk contains the close tag AT THE START — the
+        # post-close visible text surfaces from THIS feed() call, not
+        # from flush().
+        third_visible = s.feed("</think>\n\n4")
+        assert extracted == ["The user is asking a simple math question."]
+        assert third_visible == "\n\n4"
+        assert s.flush() == ""
+
+
+class TestDrainExtractedReasoning:
+    """``drain_extracted_reasoning`` returns AND clears the per-feed list.
+
+    The streaming accumulator (``chat_completion_helpers.py``) calls this
+    after every ``feed()`` so it can re-merge the extracted reasoning into
+    ``reasoning_parts`` for the post-turn ``msg["reasoning_content"]``
+    field.  Without the drain the accumulator would either miss the
+    extraction (callback-only path doesn't return the text) or double-merge
+    (if feed() also returned the extraction).
+    """
+
+    def test_drain_returns_extracted_text(self) -> None:
+        s = StreamingThinkScrubber()
+        s.feed("<think>reasoning here</think>visible")
+        drained = s.drain_extracted_reasoning()
+        assert drained == ["reasoning here"]
+
+    def test_drain_clears_after_return(self) -> None:
+        s = StreamingThinkScrubber()
+        s.feed("<think>reasoning here</think>visible")
+        s.drain_extracted_reasoning()
+        # Second drain returns empty.
+        assert s.drain_extracted_reasoning() == []
+
+    def test_drain_resets_per_feed(self) -> None:
+        """A second feed() resets the per-feed list so the caller only sees the latest extraction."""
+        s = StreamingThinkScrubber()
+        s.feed("<think>first</think>A")
+        s.drain_extracted_reasoning()  # consume "first"
+        # No tags in second feed — drain returns empty.
+        s.feed("B")
+        assert s.drain_extracted_reasoning() == []
+
+    def test_drain_returns_multiple_chunks(self) -> None:
+        """Multiple closed pairs in one feed produce multiple chunks."""
+        s = StreamingThinkScrubber()
+        s.feed("<think>a</think> middle <think>b</think> end")
+        assert s.drain_extracted_reasoning() == ["a", "b"]
+
+    def test_drain_empty_when_no_extraction(self) -> None:
+        s = StreamingThinkScrubber()
+        s.feed("no reasoning tags here")
+        assert s.drain_extracted_reasoning() == []
+
+    def test_drain_works_without_callback(self) -> None:
+        """Drain returns the extracted text regardless of whether a callback is installed.
+
+        The callback path is for live consumers (desktop/CLI/TUI
+        ``reasoning.delta`` events).  The drain path is for the
+        post-turn ``reasoning_content`` assembly.  Both must work
+        independently.
+        """
+        s = StreamingThinkScrubber()  # no callback
+        s.feed("<think>reasoning here</think>visible")
+        assert s.drain_extracted_reasoning() == ["reasoning here"]

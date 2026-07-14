@@ -5,6 +5,7 @@ only the head, and re-appends the verbatim tail. Inspired by Claude Code's
 Rewind "Summarize up to here" action (v2.1.139, May 2026).
 """
 
+import sys
 from unittest.mock import MagicMock, patch
 
 from tests.cli.test_cli_init import _make_cli

@@ -3,6 +3,7 @@
 Inspired by Claude Code's /compact <focus> feature.
 """
 
+import sys
 from unittest.mock import MagicMock, patch
 
 from tests.cli.test_cli_init import _make_cli

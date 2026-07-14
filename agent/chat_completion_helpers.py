@@ -2036,7 +2036,22 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
                 content_parts.append(delta.content)
                 if not tool_calls_acc:
                     _fire_first_delta()
-                    agent._fire_stream_delta(delta.content)
+                    extracted_reasoning = agent._fire_stream_delta(delta.content)
+                    # Merge any inline reasoning the think-scrubber
+                    # extracted from this content delta into the same
+                    # reasoning_parts list that already receives
+                    # ``delta.reasoning_content`` chunks.  Without this
+                    # merge, providers that emit reasoning INLINE in
+                    # the content stream (MiniMax-M3 on api.minimax.io/v1
+                    # with ``thinking: {type: adaptive}`` is the
+                    # canonical case) would see the live reasoning
+                    # callback fire but the post-turn
+                    # ``msg["reasoning_content"]`` field would still be
+                    # empty — losing the chain-of-thought from any
+                    # non-streaming consumer (CLI post-response display,
+                    # replay/mirror, API request mirroring).
+                    if extracted_reasoning:
+                        reasoning_parts.append(extracted_reasoning)
                     deltas_were_sent["yes"] = True
                 # Tool calls suppress regular content streaming (avoids
                 # displaying chatty "I'll use the tool..." text alongside

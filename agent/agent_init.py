@@ -731,7 +731,20 @@ def init_agent(
     # '<think>' as delta1 and 'Let me check' as delta2 — the regex
     # erased delta1, so downstream state machines never learned a
     # block was open and leaked delta2 as content).
-    agent._stream_think_scrubber = StreamingThinkScrubber()
+    #
+    # The reasoning-extraction callback wires the scrubber's discarded
+    # ``<tag>…</tag>`` inner content into ``agent._fire_reasoning_delta``
+    # so providers that emit reasoning INLINE in the content stream
+    # (MiniMax-M3 on api.minimax.io/v1 with ``thinking: {type: adaptive}``
+    # is the canonical case — its OpenAI-compatible route returns
+    # ``<think>…</think>`` blocks in ``delta.content`` rather than a
+    # separate ``reasoning_content`` field) get their chain-of-thought
+    # routed to the reasoning channel (desktop's ``reasoning.delta``
+    # events, CLI's reasoning box, TUI's reasoning row) instead of
+    # being silently thrown away when the scrubber strips the tags.
+    agent._stream_think_scrubber = StreamingThinkScrubber(
+        on_reasoning_extracted=lambda text: agent._fire_reasoning_delta(text)
+    )
     # Visible assistant text already delivered through live token callbacks
     # during the current model response. Used to avoid re-sending the same
     # commentary when the provider later returns it as a completed interim

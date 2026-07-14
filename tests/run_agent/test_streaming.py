@@ -899,6 +899,128 @@ class TestReasoningStreaming:
         assert response.choices[0].message.content == "The answer is 42"
 
 
+class TestInlineReasoningRouting:
+    """MiniMax-M3 / similar inline-thinking providers must route ``<think>…</think>`` reasoning to the reasoning channel.
+
+    When a provider emits reasoning INLINE in the streamed ``content`` field
+    (MiniMax-M3 on api.minimax.io/v1 with ``thinking: {type: adaptive}``
+    is the canonical case), ``agent._fire_reasoning_delta`` would never
+    fire because ``delta.reasoning_content`` is ``None`` — the
+    streaming accumulator at ``chat_completion_helpers.py:2028`` only
+    fires the reasoning callback when reasoning arrives on a separate
+    field.  The reasoning would then be silently stripped by the
+    think-scrubber (``run_agent._fire_stream_delta``) before any
+    consumer (desktop's ``reasoning.delta`` events, CLI's reasoning
+    box, TUI's reasoning row) sees it.
+
+    Fix: ``agent_init.py`` wires the think-scrubber's
+    ``on_reasoning_extracted`` callback to ``_fire_reasoning_delta``,
+    so the inline ``<think>…</think>`` body is routed to the reasoning
+    channel BEFORE the scrubber strips the tags from the visible text.
+    These tests pin that contract end-to-end.
+    """
+
+    @patch("run_agent.AIAgent._close_request_openai_client")
+    def test_inline_reasoning_routes_to_reasoning_callback(
+        self, mock_close,
+    ):
+        """``<think>reasoning</think>answer`` flowing through ``delta.content`` fires the reasoning callback."""
+        from run_agent import AIAgent
+
+        # Reproduces the exact wire shape confirmed by direct MiniMax API
+        # capture (see commit message): three SSE chunks carrying the open
+        # tag, the body, and the close tag + visible text respectively.
+        chunks = [
+            _make_stream_chunk(content="<think>"),
+            _make_stream_chunk(content="The user is asking a simple math question."),
+            _make_stream_chunk(content="</think>\n\n4"),
+            _make_stream_chunk(finish_reason="stop"),
+        ]
+
+        reasoning_deltas: list[str] = []
+        text_deltas: list[str] = []
+
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.return_value = iter(chunks)
+        mock_close.return_value = mock_client  # unused; satisfies signature
+
+        with patch.object(AIAgent, "_create_request_openai_client") as mock_create:
+            mock_create.return_value = mock_client
+            agent = AIAgent(
+                api_key="test-key",
+                base_url="https://api.minimax.io/v1",
+                model="MiniMax-M3",
+                quiet_mode=True,
+                skip_context_files=True,
+                skip_memory=True,
+                stream_delta_callback=lambda t: text_deltas.append(t),
+                reasoning_callback=lambda t: reasoning_deltas.append(t),
+            )
+            agent.api_mode = "chat_completions"
+            agent._interrupt_requested = False
+            response = agent._interruptible_streaming_api_call({})
+
+        # The full reasoning body reaches the reasoning callback once.
+        assert reasoning_deltas == [
+            "The user is asking a simple math question."
+        ], (
+            "Inline ``<think>…</think>`` reasoning must reach the "
+            "reasoning_callback — otherwise the desktop's reasoning row, "
+            "CLI's reasoning box, and TUI's reasoning row render empty."
+        )
+        # The visible stream is the post-close text only.
+        assert "".join(text_deltas).strip() == "4", (
+            f"Visible text leaked the ``<think>…</think>`` body: {text_deltas!r}"
+        )
+        # The reasoning is also captured on the assembled assistant message
+        # so non-streaming consumers (post-response, replay, API mirroring)
+        # see it.
+        assert (
+            response.choices[0].message.reasoning_content
+            == "The user is asking a simple math question."
+        )
+
+    @patch("run_agent.AIAgent._close_request_openai_client")
+    def test_inline_reasoning_does_not_fire_when_reasoning_callback_unset(
+        self, mock_close,
+    ):
+        """No reasoning_callback → scrubber silently strips, behavior unchanged from pre-fix.
+
+        Backward-compat: callers that don't register a reasoning_callback
+        see the same byte-for-byte output as before the fix (visible
+        text without ``<think>…</think>`` tags).
+        """
+        from run_agent import AIAgent
+
+        chunks = [
+            _make_stream_chunk(content="<think>secret</think>visible"),
+            _make_stream_chunk(finish_reason="stop"),
+        ]
+
+        text_deltas: list[str] = []
+
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.return_value = iter(chunks)
+
+        with patch.object(AIAgent, "_create_request_openai_client") as mock_create:
+            mock_create.return_value = mock_client
+            agent = AIAgent(
+                api_key="test-key",
+                base_url="https://api.minimax.io/v1",
+                model="MiniMax-M3",
+                quiet_mode=True,
+                skip_context_files=True,
+                skip_memory=True,
+                stream_delta_callback=lambda t: text_deltas.append(t),
+                # reasoning_callback intentionally NOT set
+            )
+            agent.api_mode = "chat_completions"
+            agent._interrupt_requested = False
+            agent._interruptible_streaming_api_call({})
+
+        assert "".join(text_deltas) == "visible"
+
+
 # ── Test: _has_stream_consumers ──────────────────────────────────────────
 
 
