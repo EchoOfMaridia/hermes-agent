@@ -1570,7 +1570,11 @@ class TestWebServerEndpoints:
         finally:
             db.close()
 
-        resp = self.client.get("/api/sessions/search?q=distinctneedle")
+        # Quoted query exercises the FTS-content path that powers content
+        # search (`"…"` toggle). An unquoted query would route to title mode
+        # and skip FTS, which is the right behavior but not what this
+        # lineage-dedup test is checking.
+        resp = self.client.get("/api/sessions/search?q=%22distinctneedle%22")
         assert resp.status_code == 200
         results = resp.json()["results"]
 
@@ -1607,7 +1611,10 @@ class TestWebServerEndpoints:
         finally:
             db.close()
 
-        resp = self.client.get("/api/sessions/search?q=branchspecificneedle")
+        # Quoted query exercises the FTS-content path. See
+        # test_search_dedupes_compression_lineage_to_tip for why unquoted
+        # doesn't reach FTS.
+        resp = self.client.get("/api/sessions/search?q=%22branchspecificneedle%22")
         assert resp.status_code == 200
         results = resp.json()["results"]
 

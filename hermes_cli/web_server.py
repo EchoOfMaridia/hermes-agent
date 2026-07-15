@@ -4195,20 +4195,42 @@ def get_profiles_sessions(
     }
 
 
+def _is_quoted_query(q: str) -> bool:
+    """Title-vs-content toggle: a query wrapped in double-quotes is content,
+    anything else is title. The check is intentionally strict — both ends must
+    be `"`, and the inner payload must be non-empty after stripping — so
+    ordinary phrase searches without quotes always stay in title mode.
+    """
+    if not isinstance(q, str):
+        return False
+    s = q.strip()
+    return len(s) >= 2 and s[0] == '"' and s[-1] == '"'
+
+
 @app.get("/api/sessions/search")
 async def search_sessions(q: str = "", limit: int = 20, profile: Optional[str] = None):
-    """Search sessions by ID plus full-text message content using FTS5.
+    """Search sessions by ID plus either title (default) or full-text message
+    content (when the query is wrapped in ``"…"``).
 
-    Direct session-id matches are surfaced first, then FTS message-content
-    matches. Results are deduped by compression lineage, not by raw
-    ``session_id``. Auto-compression rotates a conversation onto a fresh
-    session id (and leaves the old segment's messages in the FTS index), so one
-    logical chat can own many ``sessions`` rows that all match the same query.
-    Branches also use ``parent_session_id``, but they are real alternate
-    conversations; don't collapse branch-specific hits back into the parent.
+    The quote-toggle rule: an unquoted query (e.g. ``autogenesis mobile``)
+    matches session **titles** via a case-insensitive substring scan over
+    ``list_sessions_rich``. A quoted query (e.g. ``"autogenesis mobile"``)
+    matches session **message content** via the FTS5 ``search_messages`` index.
+    Direct session-id matches run in both modes so users pasting an id from
+    CLI/logs always find it.
+
+    Results are deduped by compression lineage, not by raw ``session_id``.
+    Auto-compression rotates a conversation onto a fresh session id (and
+    leaves the old segment's messages in the FTS index), so one logical chat
+    can own many ``sessions`` rows that all match the same query. Branches
+    also use ``parent_session_id``, but they are real alternate conversations;
+    don't collapse branch-specific hits back into the parent.
     """
     if not q or not q.strip():
         return {"results": []}
+    quoted_mode = _is_quoted_query(q)
+    # Inner phrase for the FTS branch; pass-through for the title branch.
+    effective_q = q[1:-1].strip() if quoted_mode else q.strip()
     try:
         db = _open_session_db_for_profile(profile)
         try:
@@ -4305,7 +4327,9 @@ async def search_sessions(q: str = "", limit: int = 20, profile: Optional[str] =
             # logs, or another Hermes surface. FTS can't find those unless the
             # id happens to appear in message text. search_sessions_by_id is
             # SQL-bounded, so this stays cheap even with thousands of sessions.
-            for row in db.search_sessions_by_id(q, limit=safe_limit, include_archived=True):
+            # Use effective_q (quotes stripped) so a pasted id wrapped in
+            # accidental quotes still resolves.
+            for row in db.search_sessions_by_id(effective_q, limit=safe_limit, include_archived=True):
                 sid = row.get("id")
                 preview = (row.get("preview") or "").strip()
                 snippet = preview or f"Session ID: {sid}"
@@ -4320,35 +4344,72 @@ async def search_sessions(q: str = "", limit: int = 20, profile: Optional[str] =
                     },
                 )
 
-            # Auto-add prefix wildcards so partial words match
-            # e.g. "nimb" → "nimb*" matches "nimby"
-            # Preserve quoted phrases and existing wildcards as-is
-            import re
-            terms = []
-            for token in re.findall(r'"[^"]*"|\S+', q.strip()):
-                if token.startswith('"') or token.endswith("*"):
-                    terms.append(token)
-                else:
-                    terms.append(token + "*")
-            prefix_query = " ".join(terms)
-            # Over-fetch so lineage dedup can still surface `limit` distinct
-            # conversations even when several hits collapse onto one root.
-            fetch_limit = max(safe_limit * 5, 50)
-            matches = db.search_messages(query=prefix_query, limit=fetch_limit)
+            # Quoted mode is the only mode that reaches this point — title mode skips
+            # the FTS branch entirely (the whole point of the quote toggle is
+            # that an unquoted query must not surface sessions whose only
+            # matching substring lives in message bodies).
+            #
+            # Wrap the inner phrase as a single FTS5 quoted-phrase token —
+            # no prefix wildcards. Phrase-precise matches.
+            if quoted_mode:
+                prefix_query = f'"{effective_q}"'
+                # Over-fetch so lineage dedup can still surface `limit` distinct
+                # conversations even when several hits collapse onto one root.
+                fetch_limit = max(safe_limit * 5, 50)
+                matches = db.search_messages(query=prefix_query, limit=fetch_limit)
 
-            for m in matches:
-                if len(seen) >= safe_limit:
-                    break
-                add_lineage_result(
-                    m["session_id"],
-                    {
-                        "snippet": m.get("snippet", ""),
-                        "role": m.get("role"),
-                        "source": m.get("source"),
-                        "model": m.get("model"),
-                        "session_started": m.get("session_started"),
-                    },
-                )
+                for m in matches:
+                    if len(seen) >= safe_limit:
+                        break
+                    add_lineage_result(
+                        m["session_id"],
+                        {
+                            "snippet": m.get("snippet", ""),
+                            "role": m.get("role"),
+                            "source": m.get("source"),
+                            "model": m.get("model"),
+                            "session_started": m.get("session_started"),
+                        },
+                    )
+
+            # Title-mode branch (unquoted queries only). Substring match over
+            # the most-recent sessions is fast enough that a SQL LIKE would
+            # be premature; an in-Python lowercased scan over the projected
+            # list keeps the path uniform with the rest of this endpoint.
+            # The same `seen` / `add_lineage_result` machinery handles
+            # compression-lineage dedup, so an id-only hit and a title-only
+            # hit on the same logical conversation collapse to one row.
+            if not quoted_mode:
+                needle = effective_q.lower().strip()
+                if needle:
+                    title_over_fetch = max(safe_limit * 3, 60)
+                    title_rows = db.list_sessions_rich(
+                        source=None,
+                        limit=title_over_fetch,
+                        order_by_last_active=True,
+                        compact_rows=True,
+                    )
+                    for row in title_rows:
+                        if len(seen) >= safe_limit:
+                            break
+                        title = (row.get("title") or "").strip()
+                        if not title or needle not in title.lower():
+                            continue
+                        sid = row.get("id")
+                        add_lineage_result(
+                            sid,
+                            {
+                                # Use the title as the snippet so the
+                                # frontend renders it via sessionTitle()
+                                # fallback when the row isn't loaded yet.
+                                "snippet": title,
+                                "role": None,
+                                "source": row.get("source"),
+                                "model": row.get("model"),
+                                "session_started": row.get("started_at"),
+                            },
+                        )
+
             return {"results": list(seen.values())}
         finally:
             db.close()

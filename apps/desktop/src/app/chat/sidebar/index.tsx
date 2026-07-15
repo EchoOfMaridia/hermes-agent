@@ -23,7 +23,7 @@ import { searchSessions, type SessionInfo, type SessionSearchResult } from '@/he
 import { useI18n } from '@/i18n'
 import { comboTokens } from '@/lib/keybinds/combo'
 import { profileColor } from '@/lib/profile-color'
-import { sessionMatchesSearch } from '@/lib/session-search'
+import { sessionMatchesSearch, sessionTitleMatches, parseSearchMode } from '@/lib/session-search'
 import { normalizeSessionSource, sessionSourceLabel } from '@/lib/session-source'
 import { cn } from '@/lib/utils'
 import { $cronJobs } from '@/store/cron'
@@ -175,8 +175,18 @@ const HEADER_NAV_BTN =
 // FTS results cover sessions that aren't in the loaded page; synthesize a
 // minimal SessionInfo so they render in the same row component (resume works
 // by id; the snippet stands in for the preview).
-function searchResultToSession(result: SessionSearchResult): SessionInfo {
+//
+// Title-vs-content toggle note: when the server returns a title-mode hit
+// (unquoted query), `result.snippet` IS the title — the backend uses the
+// session's title as the snippet so we have something to render before the
+// row is loaded. Setting `title: result.snippet` directly keeps that intent
+// explicit and avoids relying on the `preview`-fallback in sessionTitle().
+function searchResultToSession(result: SessionSearchResult, fallbackSession?: SessionInfo): SessionInfo {
   const ts = result.session_started ?? Date.now() / 1000
+  const snippet = result.snippet?.trim() || null
+  // Prefer the loaded session's real title (if we have it) over the snippet —
+  // a stale title on the loaded row beats a re-typed one from the server.
+  const titleFromLoaded = fallbackSession?.title?.trim() || null
 
   return {
     archived: false,
@@ -190,10 +200,10 @@ function searchResultToSession(result: SessionSearchResult): SessionInfo {
     message_count: 0,
     model: result.model ?? null,
     output_tokens: 0,
-    preview: result.snippet?.trim() || null,
+    preview: snippet,
     source: result.source ?? null,
     started_at: ts,
-    title: null,
+    title: titleFromLoaded ?? snippet,
     tool_call_count: 0
   }
 }
@@ -400,7 +410,16 @@ export function ChatSidebar({
             setServerMatches(res.results)
           }
         })
-        .catch(() => undefined)
+        .catch(err => {
+          // Visible warning, not a silent swallow. The endpoint now has a
+          // title branch (T1 of session-title-search.md) so a 404 here
+          // means the backend is genuinely down or running an older build
+          // — both worth surfacing instead of silently degrading to
+          // client-side matches only.
+          if (typeof console !== 'undefined') {
+            console.warn('[Sidebar/SessionSearch] searchSessions failed', err)
+          }
+        })
         .finally(() => {
           if (!cancelled) {
             setSearchPending(false)
@@ -421,8 +440,15 @@ export function ChatSidebar({
 
     const out = new Map<string, SessionInfo>()
 
+    // Title-vs-content quote toggle. Unquoted queries match against titles
+    // only (so a session whose preview happens to contain the substring
+    // doesn't show up); quoted queries use the broader content match and
+    // also pull in FTS hits from the server.
+    const { mode } = parseSearchMode(trimmedQuery)
+    const matchesFn = mode === 'title' ? sessionTitleMatches : sessionMatchesSearch
+
     for (const s of sortedSessions) {
-      if (sessionMatchesSearch(s, trimmedQuery)) {
+      if (matchesFn(s, trimmedQuery)) {
         out.set(s.id, s)
       }
     }
@@ -433,7 +459,7 @@ export function ChatSidebar({
       }
 
       const loaded = sessionByAnyId.get(match.session_id)
-      out.set(match.session_id, loaded ?? searchResultToSession(match))
+      out.set(match.session_id, loaded ?? searchResultToSession(match, loaded ?? undefined))
     }
 
     return [...out.values()]

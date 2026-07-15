@@ -62,6 +62,13 @@ export function SessionPickerDialog({ activeStoredSessionId, onOpenChange, onRes
                 {sessions.map(session => {
                   const title = sessionTitle(session)
                   const preview = session.preview?.trim()
+                  // cmdk fuzzy-matches against the `value` string, so the
+                  // preview is intentionally excluded — it often contains
+                  // tool-call JSON, file paths, and message fragments that
+                  // would dominate matches and bury real title hits. Title
+                  // is the primary match surface; session id is a power-user
+                  // fallback for pasting a known id into the picker.
+                  const searchValue = `${title} ${session.id}`
 
                   return (
                     <CommandItem
@@ -71,7 +78,7 @@ export function SessionPickerDialog({ activeStoredSessionId, onOpenChange, onRes
                         onResume(session.id)
                         onOpenChange(false)
                       }}
-                      value={`${title} ${preview ?? ''} ${session.id}`}
+                      value={searchValue}
                     >
                       <MessageCircle className="size-4 shrink-0 text-muted-foreground" />
                       <span className="flex min-w-0 flex-col leading-snug">
