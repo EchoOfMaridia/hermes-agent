@@ -2134,12 +2134,18 @@ class MCPServerTask:
                         break
         finally:
             for t in (shutdown_task, reconnect_task):
-                if not t.done():
+                if t.done():
+                    continue
+                try:
+                    # ``Task.cancel`` schedules ``call_soon`` on the
+                    # task's loop, which raises when the loop has been
+                    # closed. The ``except`` below absorbs that error
+                    # alongside the normal CancelledError so the finally
+                    # block completes cleanly regardless of loop state.
                     t.cancel()
-                    try:
-                        await t
-                    except (asyncio.CancelledError, Exception):
-                        pass
+                    await t
+                except (asyncio.CancelledError, Exception):
+                    pass
 
         if self._shutdown_event.is_set():
             return "shutdown"
@@ -2178,12 +2184,18 @@ class MCPServerTask:
             )
         finally:
             for t in (shutdown_task, reconnect_task):
-                if not t.done():
+                if t.done():
+                    continue
+                try:
+                    # ``Task.cancel`` schedules ``call_soon`` on the
+                    # task's loop, which raises when the loop has been
+                    # closed. The ``except`` below absorbs that error
+                    # alongside the normal CancelledError so the finally
+                    # block completes cleanly regardless of loop state.
                     t.cancel()
-                    try:
-                        await t
-                    except (asyncio.CancelledError, Exception):
-                        pass
+                    await t
+                except (asyncio.CancelledError, Exception):
+                    pass
         if self._shutdown_event.is_set():
             return "shutdown"
         self._reconnect_event.clear()
@@ -3137,12 +3149,18 @@ class MCPServerTask:
             )
         finally:
             for task in (shutdown_task, reconnect_task):
-                if not task.done():
+                if task.done():
+                    continue
+                try:
+                    # ``Task.cancel`` schedules ``call_soon`` on the
+                    # task's loop, which raises when the loop has been
+                    # closed. The ``except`` below absorbs that error
+                    # alongside the normal CancelledError so the finally
+                    # block completes cleanly regardless of loop state.
                     task.cancel()
-                    try:
-                        await task
-                    except (asyncio.CancelledError, Exception):
-                        pass
+                    await task
+                except (asyncio.CancelledError, Exception):
+                    pass
 
 
 # ---------------------------------------------------------------------------
