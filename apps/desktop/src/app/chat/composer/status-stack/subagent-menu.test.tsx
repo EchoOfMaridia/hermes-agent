@@ -15,10 +15,7 @@ import { MemoryRouter } from 'react-router-dom'
 import { afterEach, beforeEach, beforeAll, describe, expect, it, vi } from 'vitest'
 
 import { $activeSessionId, setActiveSessionId } from '@/store/session'
-import {
-  $subagentsBySession,
-  upsertSubagent
-} from '@/store/subagents'
+import { $subagentsBySession, upsertSubagent } from '@/store/subagents'
 import { $statusItemsBySession } from '@/store/composer-status'
 
 import { ComposerStatusStack } from './index'
@@ -97,9 +94,7 @@ describe('subagents menu — running subagent renders in the composer status sta
     render(<Harness sessionId="parent-runtime" />)
 
     // The goal text appears in the rendered row.
-    expect(
-      screen.getByText(/Scan \/home\/cage\/projects for TODOs/)
-    ).toBeTruthy()
+    expect(screen.getByText(/Scan \/home\/cage\/projects for TODOs/)).toBeTruthy()
   })
 
   it('section auto-expands when a subagent is running, no click required', () => {

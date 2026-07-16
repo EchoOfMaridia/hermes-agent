@@ -60,6 +60,7 @@ export interface GatewayClientOptions {
 }
 
 const ANY = '*'
+
 // Per-method timeout ceiling overrides. The shared gateway client used
 // to apply a flat ``DEFAULT_REQUEST_TIMEOUT_MS = 120_000`` to EVERY
 // call, regardless of which RPC the call was for. That default is
@@ -275,6 +276,7 @@ export class JsonRpcGatewayClient {
     // any RPC the gateway actually runs.
     if (timeoutMs === undefined) {
       const perMethod = LONG_METHOD_TIMEOUT_MS[method]
+
       if (perMethod !== undefined) {
         // Per-method ceiling is a FLOOR, never a CAP. The connection-level
         // ``requestTimeoutMs`` may itself be longer than the per-method
@@ -286,6 +288,7 @@ export class JsonRpcGatewayClient {
         timeoutMs = this.options.requestTimeoutMs
       }
     }
+
     const socket = this.socket
 
     if (!socket || socket.readyState !== WebSocket.OPEN) {

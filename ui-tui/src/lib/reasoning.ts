@@ -39,15 +39,25 @@ export function splitReasoning(input: string): SplitReasoning {
         // and stripping stay aligned.
         const nl = '\n\n'
         const nli = trimmed.indexOf(nl)
+
         if (nli !== -1) {
           const thinking = trimmed.slice(0, nli).trim()
           const answer = trimmed.slice(nli + nl.length).trim()
-          if (thinking) reasoning.push(thinking)
-          if (answer) return '\n' + answer
+
+          if (thinking) {
+            reasoning.push(thinking)
+          }
+
+          if (answer) {
+            return '\n' + answer
+          }
+
           return ''
         }
+
         // No \n\n — pure thinking, strip the whole post-tag run.
         reasoning.push(trimmed)
+
         return ''
       }
 

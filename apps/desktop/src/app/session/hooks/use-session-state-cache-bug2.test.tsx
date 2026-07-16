@@ -89,9 +89,7 @@ describe('useSessionStateCache — session switch flush (bug #2)', () => {
 
     // User clicks session B. The Cached fast-path then: rerender with B's
     // runtime as activeSessionId, then sync B's cached state into the view.
-    rerender(
-      <Harness activeSessionId="b-runtime" onReady={c => (cache = c)} selectedStoredSessionId="b-stored" />
-    )
+    rerender(<Harness activeSessionId="b-runtime" onReady={c => (cache = c)} selectedStoredSessionId="b-stored" />)
 
     // Simulate the cached fast-path: store B's cached state under b-runtime.
     act(() => {

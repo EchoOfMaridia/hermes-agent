@@ -39,8 +39,8 @@ import {
   planReload,
   planRestore,
   runRewindSubmit,
-  useSubmitPrompt,
-  type SubmitTextOptions
+  type SubmitTextOptions,
+  useSubmitPrompt
 } from '../session/hooks/use-prompt-actions/rewind'
 
 import type { ComposerScope } from './composer/scope'

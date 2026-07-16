@@ -26,7 +26,7 @@ import { searchSessions, type SessionInfo, type SessionSearchResult } from '@/he
 import { useI18n } from '@/i18n'
 import { comboTokens } from '@/lib/keybinds/combo'
 import { profileColor } from '@/lib/profile-color'
-import { sessionMatchesSearch, sessionTitleMatches, parseSearchMode } from '@/lib/session-search'
+import { parseSearchMode, sessionMatchesSearch, sessionTitleMatches } from '@/lib/session-search'
 import { normalizeSessionSource, sessionSourceLabel } from '@/lib/session-source'
 import { cn } from '@/lib/utils'
 import { $cronJobs } from '@/store/cron'

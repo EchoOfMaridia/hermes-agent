@@ -577,9 +577,7 @@ describe('assistant-ui streaming renderer', () => {
       }
     } as ThreadMessage
 
-    const { container } = render(
-      <RunningMessageHarness message={reasoningFirstMessage} />
-    )
+    const { container } = render(<RunningMessageHarness message={reasoningFirstMessage} />)
 
     const ui = within(container)
 
@@ -591,9 +589,10 @@ describe('assistant-ui streaming renderer', () => {
     fireEvent.click(thinkingToggle)
 
     // Now the reasoning text should be visible in the disclosure.
-    const reasoningText = ui.getByRole('button', { name: /thinking/i }).parentElement?.parentElement?.querySelector(
-      '[data-slot="aui_reasoning-text"]'
-    )
+    const reasoningText = ui
+      .getByRole('button', { name: /thinking/i })
+      .parentElement?.parentElement?.querySelector('[data-slot="aui_reasoning-text"]')
+
     expect(reasoningText?.textContent).toContain('Let me work through this problem.')
 
     // Verify the thinking disclosure precedes the response text in rendered text order.

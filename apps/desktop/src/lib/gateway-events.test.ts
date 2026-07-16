@@ -1,10 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import {
-  gatewayEventCompletedFileDiff,
-  gatewayEventRequiresSessionId,
-  isCompactingStatusKind
-} from './gateway-events'
+import { gatewayEventRequiresSessionId, isCompactingStatusKind } from './gateway-events'
 
 describe('gateway event routing', () => {
   it('drops only unscoped subagent events (genuinely background work)', () => {

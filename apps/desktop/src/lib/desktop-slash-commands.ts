@@ -103,9 +103,19 @@ const unavailable = (reason: DesktopUnavailableReason): DesktopCommandSurface =>
 const DESKTOP_COMMAND_SPECS: readonly DesktopCommandSpec[] = [
   // Local client actions
   { name: '/new', description: 'Start a new desktop chat', aliases: ['/reset'], surface: action('new') },
-  { name: '/branch', description: 'Branch the latest message into a new chat', aliases: ['/fork'], surface: action('branch') },
+  {
+    name: '/branch',
+    description: 'Branch the latest message into a new chat',
+    aliases: ['/fork'],
+    surface: action('branch')
+  },
   { name: '/yolo', description: 'Toggle YOLO — auto-approve dangerous commands', surface: action('yolo') },
-  { name: '/handoff', description: 'Hand off this session to a messaging platform', surface: action('handoff'), args: true },
+  {
+    name: '/handoff',
+    description: 'Hand off this session to a messaging platform',
+    surface: action('handoff'),
+    args: true
+  },
   { name: '/profile', description: 'Switch the active Hermes profile', surface: action('profile') },
   { name: '/skin', description: 'Switch desktop theme or cycle to the next one', surface: action('skin'), args: true },
   { name: '/title', description: 'Rename the current session', surface: action('title') },
@@ -167,7 +177,12 @@ const DESKTOP_COMMAND_SPECS: readonly DesktopCommandSpec[] = [
   },
 
   // Backend-executed commands that render useful inline output
-  { name: '/agents', description: 'Show active desktop sessions and running tasks', aliases: ['/tasks'], surface: exec() },
+  {
+    name: '/agents',
+    description: 'Show active desktop sessions and running tasks',
+    aliases: ['/tasks'],
+    surface: exec()
+  },
   { name: '/background', description: 'Run a prompt in the background', aliases: ['/bg', '/btw'], surface: exec() },
   { name: '/compress', description: 'Compress this conversation context', surface: action('compress'), args: true },
   { name: '/debug', description: 'Create a debug report', surface: exec() },
@@ -188,8 +203,19 @@ const DESKTOP_COMMAND_SPECS: readonly DesktopCommandSpec[] = [
   // available in the terminal interface" stub — which is the "no business
   // being a thing" case: the command exists, it's safe, the gateway handles
   // it. So route it through the slash worker like `/agents` and `/tools`.
-  { name: '/reload-mcp', description: 'Reload MCP servers in the live session', aliases: ['/reload_mcp'], surface: exec(), args: true },
-  { name: '/reload-skills', description: 'Re-scan installed skills in the live gateway', aliases: ['/reload_skills'], surface: exec() },
+  {
+    name: '/reload-mcp',
+    description: 'Reload MCP servers in the live session',
+    aliases: ['/reload_mcp'],
+    surface: exec(),
+    args: true
+  },
+  {
+    name: '/reload-skills',
+    description: 'Re-scan installed skills in the live gateway',
+    aliases: ['/reload_skills'],
+    surface: exec()
+  },
   { name: '/retry', description: 'Retry the last user message', surface: exec() },
   { name: '/rollback', description: 'List or restore filesystem checkpoints', surface: exec() },
   { name: '/save', description: 'Save the current transcript to JSON', surface: exec() },
@@ -213,9 +239,27 @@ const DESKTOP_COMMAND_SPECS: readonly DesktopCommandSpec[] = [
 // attempt to render their TUI output in the chat panel would be a lie.
 const NO_DESKTOP_SURFACE: Record<DesktopUnavailableReason, readonly string[]> = {
   terminal: [
-    '/clear', '/compact', '/copy', '/details',
-    '/exit', '/footer', '/gateway', '/indicator', '/mouse', '/paste', '/quit', '/redraw', '/restart',
-    '/sb', '/set-home', '/sethome', '/snap', '/snapshot', '/statusbar', '/toolsets', '/update'
+    '/clear',
+    '/compact',
+    '/copy',
+    '/details',
+    '/exit',
+    '/footer',
+    '/gateway',
+    '/indicator',
+    '/mouse',
+    '/paste',
+    '/quit',
+    '/redraw',
+    '/restart',
+    '/sb',
+    '/set-home',
+    '/sethome',
+    '/snap',
+    '/snapshot',
+    '/statusbar',
+    '/toolsets',
+    '/update'
   ],
   messaging: ['/approve', '/deny'],
   advanced: ['/curator', '/insights', '/kanban']

@@ -37,11 +37,9 @@ export function sessionTitleMatches(session: SessionInfo, query: string): boolea
     return true
   }
 
-  return [
-    session.id,
-    session._lineage_root_id ?? '',
-    sessionTitle(session)
-  ].some(value => value.toLowerCase().includes(needle))
+  return [session.id, session._lineage_root_id ?? '', sessionTitle(session)].some(value =>
+    value.toLowerCase().includes(needle)
+  )
 }
 
 export function sessionMatchesSearch(session: SessionInfo, query: string): boolean {

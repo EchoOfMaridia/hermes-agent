@@ -475,12 +475,9 @@ export function useMessageStream({
             // would previously skip when text was present — leaving reasoning
             // appended after the response.
             const firstTextIndex = parts.findIndex(p => p.type === 'text')
+
             if (firstTextIndex >= 0) {
-              return [
-                ...parts.slice(0, firstTextIndex),
-                reasoningPart(delta),
-                ...parts.slice(firstTextIndex),
-              ]
+              return [...parts.slice(0, firstTextIndex), reasoningPart(delta), ...parts.slice(firstTextIndex)]
             }
           }
 

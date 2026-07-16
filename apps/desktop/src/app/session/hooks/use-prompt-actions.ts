@@ -2,7 +2,7 @@ import type { AppendMessage, ThreadMessage } from '@assistant-ui/react'
 import { useStore } from '@nanostores/react'
 import { type MutableRefObject, useCallback, useEffect, useRef } from 'react'
 
-import { SESSION_COMPRESS_REQUEST_TIMEOUT_MS, getProfiles, transcribeAudio } from '@/hermes'
+import { getProfiles, SESSION_COMPRESS_REQUEST_TIMEOUT_MS, transcribeAudio } from '@/hermes'
 import { translateNow, type Translations, useI18n } from '@/i18n'
 import { stripAnsi } from '@/lib/ansi'
 import { branchGroupForUser, type ChatMessage, chatMessageText, textPart } from '@/lib/chat-messages'
@@ -37,9 +37,9 @@ import {
   updateComposerAttachment
 } from '@/store/composer'
 import { resetSessionBackground } from '@/store/composer-status'
-import { clearPreviewArtifacts } from '@/store/preview-status'
 import { clearNotifications, notify, notifyError } from '@/store/notifications'
 import { requestDesktopOnboarding } from '@/store/onboarding'
+import { clearPreviewArtifacts } from '@/store/preview-status'
 import { $activeGatewayProfile, $newChatProfile, ensureGatewayProfile, normalizeProfileKey } from '@/store/profile'
 import {
   $busy,
@@ -98,8 +98,7 @@ function delay(ms: number): Promise<void> {
 // Both come from timeouts the user actually hit; everything else stays
 // as a literal ``compression failed: <message>`` line.
 function isCompressTimeoutError(message: string): boolean {
-  return /request timed out: *session\.compress/.test(message) ||
-    /compress did not finish within \d+s/.test(message)
+  return /request timed out: *session\.compress/.test(message) || /compress did not finish within \d+s/.test(message)
 }
 
 function compressTimeoutHint(rawMessage: string): string {
@@ -110,6 +109,7 @@ function compressTimeoutHint(rawMessage: string): string {
   // needs enough context to decide between retry-vs-/new.
   const ceiling = seconds ? Math.max(1, Math.round(Number(seconds) / 60)) : 8
   const minuteLabel = ceiling === 1 ? 'minute' : 'minutes'
+
   return [
     `compression timed out after ${ceiling} ${minuteLabel}`,
     'The auxiliary model call has not returned. Try one of:',
@@ -206,9 +206,7 @@ function imageFilenameFromPath(filePath: string): string {
 // Remote gateway: the local composer-image file lives on THIS machine's disk,
 // not the gateway's, so read the bytes here and upload them via
 // image.attach_bytes. Returns null when the file can't be read.
-async function readImageForRemoteAttach(
-  filePath: string
-): Promise<{ contentBase64: string; filename: string } | null> {
+async function readImageForRemoteAttach(filePath: string): Promise<{ contentBase64: string; filename: string } | null> {
   const dataUrl = await window.hermesDesktop?.readFileDataUrl(filePath)
   const contentBase64 = dataUrl ? base64FromDataUrl(dataUrl) : ''
 
@@ -371,11 +369,7 @@ interface PromptActionsOptions {
   // narrowed to (method, params?) by mistake. See
   // ``apps/shared/src/json-rpc-gateway.ts:230`` for the underlying
   // signature.
-  requestGateway: <T>(
-    method: string,
-    params?: Record<string, unknown>,
-    timeoutMs?: number
-  ) => Promise<T>
+  requestGateway: <T>(method: string, params?: Record<string, unknown>, timeoutMs?: number) => Promise<T>
   resumeStoredSession: (storedSessionId: string) => Promise<void> | void
   selectedStoredSessionIdRef: MutableRefObject<string | null>
   startFreshSessionDraft: () => void
@@ -1009,8 +1003,10 @@ export function usePromptActions({
         // Routing through the action handler keeps /compress (and any future
         // session-scoped RPC) talking to the live gateway, never the worker.
         const actionSurface = resolveDesktopCommand(`/${name}`)?.surface
+
         if (actionSurface?.kind === 'action') {
           const handler = actionHandlers[actionSurface.action]
+
           if (handler) {
             return handler(ctx)
           }
@@ -1022,7 +1018,9 @@ export function usePromptActions({
           return
         }
 
-        const handleDispatch = async (dispatch: NonNullable<ReturnType<typeof parseCommandDispatch>>): Promise<void> => {
+        const handleDispatch = async (
+          dispatch: NonNullable<ReturnType<typeof parseCommandDispatch>>
+        ): Promise<void> => {
           if (dispatch.type === 'exec' || dispatch.type === 'plugin') {
             renderSlashOutput(dispatch.output ?? '(no output)')
 
@@ -1091,6 +1089,7 @@ export function usePromptActions({
           }
 
           const output = result && typeof result === 'object' ? (result as SlashExecResponse) : null
+
           // Backend prints "(._.) No active agent -- send a message first."
           // when an exec-style command runs before the session has an agent.
           // Translate that sentinel into a desktop-side precondition hint so
@@ -1508,12 +1507,12 @@ export function usePromptActions({
             // broke, when in reality a slow-but-eventual compress is
             // still in flight or the server hit its watchdog.
             const rawMessage = err instanceof Error ? err.message : String(err)
-            const friendlyHint = isCompressTimeoutError(rawMessage)
-              ? compressTimeoutHint(rawMessage)
-              : null
+
+            const friendlyHint = isCompressTimeoutError(rawMessage) ? compressTimeoutHint(rawMessage) : null
 
             if (friendlyHint) {
               renderSlashOutput(friendlyHint)
+
               return
             }
 
@@ -1574,9 +1573,7 @@ export function usePromptActions({
 
             renderSlashOutput(copy.reasoningSet(result.value))
           } catch (err) {
-            renderSlashOutput(
-              `reasoning failed: ${err instanceof Error ? err.message : String(err)}`
-            )
+            renderSlashOutput(`reasoning failed: ${err instanceof Error ? err.message : String(err)}`)
           }
         },
         // /fast toggles Nous fast mode. Bare /fast [status] shows the current
@@ -1642,9 +1639,7 @@ export function usePromptActions({
             setCurrentFastMode(next === 'fast')
             setCurrentServiceTier(next === 'fast' ? 'priority' : '')
           } catch (err) {
-            renderSlashOutput(
-              `fast mode failed: ${err instanceof Error ? err.message : String(err)}`
-            )
+            renderSlashOutput(`fast mode failed: ${err instanceof Error ? err.message : String(err)}`)
           }
         },
         // /busy controls the "what happens when I press Enter during a turn"
@@ -1693,9 +1688,7 @@ export function usePromptActions({
 
             renderSlashOutput(copy.busySet(result?.value || mode))
           } catch (err) {
-            renderSlashOutput(
-              `busy mode failed: ${err instanceof Error ? err.message : String(err)}`
-            )
+            renderSlashOutput(`busy mode failed: ${err instanceof Error ? err.message : String(err)}`)
           }
         },
         // /voice manages voice mode + TTS. Mirrors the TUI at
@@ -1721,6 +1714,7 @@ export function usePromptActions({
 
           const { render: renderSlashOutput, sessionId } = resolved
           const normalized = arg.trim().toLowerCase()
+
           const action: 'on' | 'off' | 'tts' | 'status' =
             normalized === 'on' || normalized === 'off' || normalized === 'tts' || normalized === 'status'
               ? normalized
@@ -1781,9 +1775,7 @@ export function usePromptActions({
               renderSlashOutput(copy.voiceDisabled)
             }
           } catch (err) {
-            renderSlashOutput(
-              `voice failed: ${err instanceof Error ? err.message : String(err)}`
-            )
+            renderSlashOutput(`voice failed: ${err instanceof Error ? err.message : String(err)}`)
           }
         },
         // /verbose cycles verbose tool-output mode via config.set. Mirrors
@@ -1822,9 +1814,7 @@ export function usePromptActions({
 
             renderSlashOutput(`verbose: ${result.value}`)
           } catch (err) {
-            renderSlashOutput(
-              `verbose failed: ${err instanceof Error ? err.message : String(err)}`
-            )
+            renderSlashOutput(`verbose failed: ${err instanceof Error ? err.message : String(err)}`)
           }
         }
       }
@@ -1968,6 +1958,7 @@ export function usePromptActions({
 
   const cancelRun = useCallback(async () => {
     const sessionId = activeSessionId || activeSessionIdRef.current
+
     const releaseBusy = () => {
       setMutableRef(busyRef, false)
       setBusy(false)
@@ -1977,13 +1968,8 @@ export function usePromptActions({
 
     const finalizeMessages = (messages: ChatMessage[], streamId?: string | null) =>
       messages
-        .filter(
-          message =>
-            !((message.pending || message.id === streamId) && !chatMessageText(message).trim())
-        )
-        .map(message =>
-          message.pending || message.id === streamId ? { ...message, pending: false } : message
-        )
+        .filter(message => !((message.pending || message.id === streamId) && !chatMessageText(message).trim()))
+        .map(message => (message.pending || message.id === streamId ? { ...message, pending: false } : message))
 
     if (!sessionId) {
       releaseBusy()
@@ -2303,7 +2289,12 @@ export function usePromptActions({
         /no longer in session history|not in session history/i.test(err instanceof Error ? err.message : String(err))
 
       try {
-        await submitRewindPrompt(sessionId, text, isFailedTurn ? undefined : visibleUserOrdinal(messages, sourceIndex), wasRunning)
+        await submitRewindPrompt(
+          sessionId,
+          text,
+          isFailedTurn ? undefined : visibleUserOrdinal(messages, sourceIndex),
+          wasRunning
+        )
       } catch (err) {
         let surfaced = err
 

@@ -125,9 +125,7 @@ describe('useSessionStateCache — cached fast-path repaints on click (bug #3)',
       )
     })
 
-    rerender(
-      <Harness activeSessionId="a-runtime" onReady={c => (cache = c)} selectedStoredSessionId="a-stored" />
-    )
+    rerender(<Harness activeSessionId="a-runtime" onReady={c => (cache = c)} selectedStoredSessionId="a-stored" />)
 
     // Mirror what `resumeSession` does in the cached fast-path:
     // setActiveSessionId(A_runtimeId), activeSessionIdRef.current = A_runtimeId,

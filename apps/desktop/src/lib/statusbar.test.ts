@@ -105,6 +105,7 @@ describe('contextBarLabel', () => {
       output: 250,
       total: 1_000_250
     })
+
     expect(label).toBe('[██████████] 100%')
   })
 
@@ -118,6 +119,7 @@ describe('contextBarLabel', () => {
       output: 0,
       total: 100_000
     })
+
     expect(label).toBe('[█████░░░░░] 50%')
   })
 
@@ -143,6 +145,7 @@ describe('contextBarLabel', () => {
       output: 0,
       total: 3_100_000
     })
+
     expect(label).toBe('[██████████] 100%')
   })
 })

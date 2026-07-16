@@ -726,11 +726,7 @@ export class GatewayClient extends EventEmitter {
     )
   }
 
-  request<T = unknown>(
-    method: string,
-    params: Record<string, unknown> = {},
-    timeoutMs?: number
-  ): Promise<T> {
+  request<T = unknown>(method: string, params: Record<string, unknown> = {}, timeoutMs?: number): Promise<T> {
     const attachUrl = resolveGatewayAttachUrl()
 
     if (attachUrl) {
