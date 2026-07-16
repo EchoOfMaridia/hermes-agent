@@ -549,4 +549,59 @@ describe('assistant-ui streaming renderer', () => {
     expect(container.querySelector('[data-slot="aui_generated-image"]')).toBeTruthy()
     expect(screen.queryByRole('status', { name: /rendering image/i })).toBeNull()
   })
+
+  // Regression test: reasoning must appear BEFORE the response text in the DOM.
+  // The bug was in appendReasoningDelta(replace=true): when reasoning.available fired
+  // after message.complete had already set the text, the old code returned parts
+  // unchanged (skipping the reasoning), so the queued reasoning.delta — flushed via
+  // RAF after the text was committed — ended up appended AFTER the text.
+  // The fix inserts reasoning before the first text part when replace=true and
+  // text is already present.
+  it('places thinking disclosure before response text when reasoning precedes text in parts', () => {
+    const reasoningFirstMessage: ThreadMessage = {
+      id: 'assistant-reasoning-first-1',
+      role: 'assistant',
+      content: [
+        { type: 'reasoning', text: ' Let me work through this problem.', status: { type: 'complete' } },
+        { type: 'text', text: 'The answer is 42.' }
+      ],
+      status: { type: 'complete', reason: 'stop' },
+      createdAt,
+      metadata: {
+        unstable_state: null,
+        unstable_annotations: [],
+        unstable_data: [],
+        steps: [],
+        custom: {}
+      }
+    } as ThreadMessage
+
+    const { container } = render(
+      <RunningMessageHarness message={reasoningFirstMessage} />
+    )
+
+    const ui = within(container)
+
+    // The thinking disclosure toggle must be present (rendered by DisclosureRow).
+    const thinkingToggle = ui.getByRole('button', { name: /thinking/i })
+    expect(thinkingToggle).toBeTruthy()
+
+    // Expand the thinking disclosure to reveal its content.
+    fireEvent.click(thinkingToggle)
+
+    // Now the reasoning text should be visible in the disclosure.
+    const reasoningText = ui.getByRole('button', { name: /thinking/i }).parentElement?.parentElement?.querySelector(
+      '[data-slot="aui_reasoning-text"]'
+    )
+    expect(reasoningText?.textContent).toContain('Let me work through this problem.')
+
+    // Verify the thinking disclosure precedes the response text in rendered text order.
+    // When the thinking is expanded, its text appears before "The answer is 42."
+    const allText = container.textContent ?? ''
+    const thinkingStart = allText.indexOf('Let me work through this problem.')
+    const answerStart = allText.indexOf('The answer is 42.')
+    expect(thinkingStart).toBeGreaterThanOrEqual(0)
+    expect(answerStart).toBeGreaterThanOrEqual(0)
+    expect(thinkingStart).toBeLessThan(answerStart)
+  })
 })

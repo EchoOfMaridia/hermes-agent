@@ -467,7 +467,21 @@ export function useMessageStream({
         sessionId,
         (parts, message) => {
           if (replace && chatMessageText(message).trim()) {
-            return parts
+            // Message already has text — insert reasoning BEFORE the first text
+            // part so the thinking disclosure appears before the response, not
+            // after it.  This is the load-bearing fix for the reverse-reasoning
+            // desktop regression: queued reasoning.delta flushes via RAF *after*
+            // message.complete sets the text, and reasoning.available (replace)
+            // would previously skip when text was present — leaving reasoning
+            // appended after the response.
+            const firstTextIndex = parts.findIndex(p => p.type === 'text')
+            if (firstTextIndex >= 0) {
+              return [
+                ...parts.slice(0, firstTextIndex),
+                reasoningPart(delta),
+                ...parts.slice(firstTextIndex),
+              ]
+            }
           }
 
           if (replace) {
