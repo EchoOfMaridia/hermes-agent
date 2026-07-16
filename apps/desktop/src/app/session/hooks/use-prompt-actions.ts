@@ -351,7 +351,16 @@ interface PromptActionsOptions {
   busyRef: MutableRefObject<boolean>
   branchCurrentSession: () => Promise<boolean>
   createBackendSessionForSend: (preview?: string | null) => Promise<string | null>
+  // Optional — upstream's prompt-actions takes this for route-drift detection
+  // (selected session vs the live route). Our single-file implementation
+  // doesn't consume it; the field exists so upstream's test index.test.tsx
+  // compiles against our tree. Safe to omit in callers that don't track a
+  // separate route token.
+  getRouteToken?: () => string
   handleSkinCommand: (arg: string) => string
+  // Optional — opens the memory-graph overlay when /journey (or alias) fires.
+  // Upstream-only feature; not consumed by our single-file submit pipeline.
+  openMemoryGraph?: () => void
   refreshSessions: () => Promise<void>
   // ``timeoutMs`` overrides the gateway client's 30s default for slow
   // server-side RPCs. /compress uses this to override the
@@ -2356,6 +2365,7 @@ export function usePromptActions({
   return {
     cancelRun,
     editMessage,
+    executeSlashCommand,
     handleThreadMessagesChange,
     handoffSession,
     reloadFromMessage,

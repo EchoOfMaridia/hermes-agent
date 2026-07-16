@@ -7113,6 +7113,7 @@ async def async_call_llm(
     timeout: float = None,
     extra_body: dict = None,
     stream: bool = False,
+    reasoning_config: Optional[dict] = None,
 ) -> Any:
     """Centralized asynchronous LLM call.
 

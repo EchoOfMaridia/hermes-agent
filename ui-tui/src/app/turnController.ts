@@ -375,30 +375,8 @@ class TurnController {
     }
 
     if (this.reasoningSegmentIndex === null) {
-      // Insert the trail BEFORE any trailing assistant text segments. When the
-      // stream produces text before the reasoning event arrives (text1 then
-      // reasoning then text2), naive append would land the trail between
-      // text1 and text2 — the TUI renders segments in array order, so the
-      // reasoning panel would appear *inside* the message body. Placing the
-      // trail at the first non-trail slot keeps the message body intact and
-      // the reasoning panel above it.
-      let insertPos = 0
-      for (let i = 0; i < this.segmentMessages.length; i++) {
-        if (this.segmentMessages[i].kind === 'trail' && this.segmentMessages[i].thinking) {
-          continue
-        }
-        insertPos = i
-        break
-      }
-      if (this.segmentMessages.length > 0 && insertPos === this.segmentMessages.length) {
-        insertPos = this.segmentMessages.length
-      }
-      this.reasoningSegmentIndex = insertPos
-      this.segmentMessages = [
-        ...this.segmentMessages.slice(0, insertPos),
-        msg,
-        ...this.segmentMessages.slice(insertPos)
-      ]
+      this.reasoningSegmentIndex = this.segmentMessages.length
+      this.segmentMessages = [...this.segmentMessages, msg]
     } else {
       this.segmentMessages = this.segmentMessages.map((item, i) => (i === this.reasoningSegmentIndex ? msg : item))
     }
@@ -413,31 +391,6 @@ class TurnController {
   }
 
   private pushSegment(msg: Msg) {
-    // Merge plain assistant text into the previous plain text segment so
-    // multi-flush text streams (e.g. text1 → reasoning → text2) render as a
-    // single MessageLine with reasoning above the merged body. Without this,
-    // every flush that lands text creates a new segment and the message
-    // appears split by whatever the next segment is (reasoning trail, tool
-    // shelf, etc).
-    if (
-      msg.role === 'assistant' &&
-      !msg.kind &&
-      !msg.thinking &&
-      !msg.tools?.length
-    ) {
-      const last = this.segmentMessages[this.segmentMessages.length - 1]
-      if (
-        last &&
-        last.role === 'assistant' &&
-        !last.kind &&
-        !last.thinking &&
-        !last.tools?.length
-      ) {
-        const merged: Msg = { ...last, text: last.text + msg.text }
-        this.segmentMessages = [...this.segmentMessages.slice(0, -1), merged]
-        return
-      }
-    }
     this.segmentMessages = appendToolShelfMessage(this.segmentMessages, msg)
   }
 
@@ -656,18 +609,17 @@ class TurnController {
       ...(tools.length && { tools })
     }
 
-    // Trail goes FIRST so the reasoning panel anchors under the user prompt
-    // rather than landing between streamed segments and the final text. The
-    // previous order ([...segments, finalDetails, finalText]) put the trail
-    // *between* the streamed text and the final assistant text — the TUI
-    // rendered the reasoning ToolTrail in the middle of the message body
-    // (the "reversed reasoning" symptom on M3 streams that arrive in pieces).
+    // Archive prepended so the trail msg anchors under the user prompt,
+    // not between thinking/tools and final assistant text.
     const finalMessages: Msg[] = [
-      ...(hasDetails(finalDetails) ? [finalDetails] : []),
       ...archiveDoneTodos(),
       ...segments,
-      ...(finalText ? [{ role: 'assistant', text: finalText }] : [])
+      ...(hasDetails(finalDetails) ? [finalDetails] : [])
     ]
+
+    if (finalText) {
+      finalMessages.push({ role: 'assistant', text: finalText })
+    }
 
     const wasInterrupted = this.interrupted
 
@@ -736,6 +688,38 @@ class TurnController {
     this.scheduleReasoning()
     this.syncReasoningSegment()
     this.pulseReasoningStreaming()
+  }
+
+  /**
+   * Render one MoA reference model's output as a committed labelled block
+   * before the aggregator responds. Unlike reasoning, references are shown
+   * regardless of showReasoning (they ARE the mixture-of-agents process the
+   * user opted into by selecting a MoA preset). Each becomes its own
+   * thinking-style segment tagged with the source model, so a multi-reference
+   * preset builds a stack the user can scroll.
+   */
+  recordMoaReference(label: string, text: string, index?: number, count?: number) {
+    if (this.interrupted) {
+      return
+    }
+
+    // Close any open reasoning segment so the reference block lands as its own
+    // committed entry rather than merging into streaming reasoning.
+    this.closeReasoningSegment()
+
+    const header = index && count ? `◇ Reference ${index}/${count} — ${label}` : `◇ Reference — ${label}`
+
+    const body = text.trim()
+    const thinking = body ? `${header}\n${body}` : header
+
+    this.pushSegment({
+      kind: 'trail',
+      role: 'system',
+      text: '',
+      thinking,
+      thinkingTokens: estimateTokensRough(thinking)
+    })
+    patchTurnState({ streamSegments: this.segmentMessages })
   }
 
   recordReasoningDelta(text: string, force = false) {
@@ -820,7 +804,13 @@ class TurnController {
             done?.verboseArgs,
             error || resultText || summary || ''
           )
-        : buildToolTrailLine(name, done?.context || '', Boolean(error), error || summary || '', duration ?? fallbackDuration)
+        : buildToolTrailLine(
+            name,
+            done?.context || '',
+            Boolean(error),
+            error || summary || '',
+            duration ?? fallbackDuration
+          )
 
     this.activeTools = this.activeTools.filter(tool => tool.id !== toolId)
 
@@ -963,9 +953,11 @@ class TurnController {
     // sticky until the policy clears them. The Python `active` latch retains the key,
     // so a yielded notice won't re-fire on the next turn.
     const yieldingNoticeKey = getUiState().notice?.key
+
     if (yieldingNoticeKey === 'credits.usage' || yieldingNoticeKey === 'credits.grant_spent') {
       this.clearNotice(yieldingNoticeKey)
     }
+
     patchUiState({ busy: true })
     patchTurnState({ activity: [], outcome: '', subagents: [], toolTokens: 0, tools: [], turnTrail: [] })
   }
