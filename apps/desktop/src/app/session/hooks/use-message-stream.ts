@@ -166,6 +166,33 @@ const SUBAGENT_EVENT_TYPES = new Set([
   'subagent.complete'
 ])
 
+// Events that prove the turn has resumed after auto-compaction armed
+// `status.update:compacting`. Whenever the gateway has just told us "I'm
+// summarizing," the very next delta/tool/reasoning/subagent/clarify event
+// means the compacted context is back and the agent is producing again —
+// the "Summarizing thread" UI must drop or it pins the thread into a
+// permanently-stuck state (see compaction-event.test.tsx).
+//
+// Deliberately omitted: `message.start` / `message.complete` / `error` /
+// `status.update` (each owns its own compaction lifecycle), and the meta
+// lifecycle events `gateway.ready` / `session.info` / `session.scoped` /
+// `cwd.changed`.
+const TURN_RESUMING_EVENT_TYPES = new Set([
+  'message.delta',
+  'thinking.delta',
+  'reasoning.delta',
+  'reasoning.available',
+  'tool.start',
+  'tool.progress',
+  'tool.generating',
+  'tool.complete',
+  'review.summary',
+  'clarify.request',
+  'secret.request',
+  'terminal.read.request',
+  ...SUBAGENT_EVENT_TYPES
+])
+
 // Anonymous progress events that carry todos but no name still belong to the
 // todo stream; named todo events are obviously routed there too.
 function toTodoPayload(payload: GatewayEventPayload | undefined): GatewayEventPayload | undefined {
@@ -736,6 +763,18 @@ export function useMessageStream({
 
       const sessionId = explicitSid || activeSessionIdRef.current
       const isActiveEvent = !!sessionId && sessionId === activeSessionIdRef.current
+
+      // Auto-clear stale compaction the moment any turn-resuming event
+      // arrives for that session. Without this, `status.update:compacting`
+      // arms the indicator and no subsequent delta/tool/reasoning event
+      // takes it down — the UI shows "Summarizing thread" forever even
+      // though text is flowing (the "Hermes stuck on Summarizing thread"
+      // report). Per-session so background turns can't poison the
+      // foreground view.
+      if (sessionId && TURN_RESUMING_EVENT_TYPES.has(event.type)) {
+        setSessionCompacting(sessionId, false)
+        compactedTurnRef.current.delete(sessionId)
+      }
 
       if (event.type === 'gateway.ready') {
         return
