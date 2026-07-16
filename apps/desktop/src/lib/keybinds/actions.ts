@@ -6,6 +6,8 @@
 // add a hotkey, add a row here and a handler there — nothing else.
 
 import { registry } from '@/contrib/registry'
+import { $voiceRecordKey } from '@/store/voice-prefs'
+import { voiceRecordKeyToCombo } from './parse-voice-record-key'
 
 import { IS_MAC } from './combo'
 
@@ -22,8 +24,10 @@ export const KEYBIND_CATEGORIES: readonly KeybindCategory[] = ['composer', 'prof
 export interface KeybindActionMeta {
   id: string
   category: KeybindCategory
-  /** Default combos. Empty = shipped unbound (user can assign one). */
-  defaults: readonly string[]
+  /** Default combos. Empty = shipped unbound (user can assign one). May be a
+   * function so the binding can read live state (e.g. the configured
+   * `voice.record_key`) without recomputing on every keystroke. */
+  defaults: readonly string[] | (() => readonly string[])
   /** Display label for CONTRIBUTED actions (built-ins use i18n). */
   label?: string
 }
@@ -57,11 +61,37 @@ export const KEYBIND_ACTIONS: readonly KeybindActionMeta[] = [
   { id: 'composer.focus', category: 'composer', defaults: [] },
   { id: 'composer.modelPicker', category: 'composer', defaults: [] },
   // Voice conversation toggle. Matches the documented `voice.record_key`
-  // (Ctrl+B). On macOS that's literally ⌃B — distinct from the ⌘B sidebar
+  // (Ctrl+B default). On macOS that's literally ⌃B — distinct from the ⌘B sidebar
   // toggle. Off macOS `ctrl` folds to `mod`, which IS the ⌘B/Ctrl+B sidebar
-  // chord, so ship it unbound there (rebindable in the panel) rather than
-  // stealing the long-standing sidebar binding.
-  { id: 'composer.voice', category: 'composer', defaults: IS_MAC ? ['ctrl+b'] : [] },
+  // chord, so we pull the binding from the configured `voice.record_key` via
+  // `$voiceRecordKey` (seeded from YAML on mount via `applyVoiceRecordKeyFromConfig`).
+  // If the user has no `voice.record_key` configured we fall back to the
+  // documented Ctrl+B on macOS only; Linux/Windows ships unbound by default to
+  // avoid colliding with `view.toggleSidebar = 'mod+b'`. A user-configured
+  // `voice.record_key` (e.g. `ctrl+o`, `ctrl+space`) binds on every platform —
+  // only the unwritten default is suppressed off-macOS to avoid stealing the
+  // long-standing sidebar binding.
+  { id: 'composer.voice', category: 'composer', defaults: () => {
+      const parsed = $voiceRecordKey.get()
+      const combo = voiceRecordKeyToCombo(parsed)
+      const isDocumentedDefault =
+        parsed.mod === 'ctrl' && parsed.ch === 'b' && parsed.named === undefined
+
+      if (IS_MAC) {
+        return [combo]
+      }
+
+      // Off-macOS, only the documented default is unbound — a user-configured
+      // key (which the normalizer has already filtered for c-m/c-j submit
+      // collisions) gets through and the canonicalize-combo layer rewrites
+      // `ctrl+…` to `mod+…` so it dispatches consistently with `comboFromEvent`.
+      if (isDocumentedDefault) {
+        return []
+      }
+
+      return [combo]
+    }
+  },
 
   // ── Profiles ─────────────────────────────────────────────────────────────
   { id: 'profile.default', category: 'profiles', defaults: ['mod+d'] },
@@ -179,8 +209,15 @@ export function contributedKeybindHandler(id: string): (() => void) | undefined 
 
 export type KeybindBindings = Record<string, string[]>
 
+/** Resolve an action's `defaults` field to a plain string array. Supports the
+ * function form so a binding can read live state (e.g. `$voiceRecordKey`) without
+ * recomputing on every keystroke — the consumer caches the result where needed. */
+export function resolveDefaults(action: KeybindActionMeta): string[] {
+  return [...(typeof action.defaults === 'function' ? action.defaults() : action.defaults)]
+}
+
 export function defaultBindings(): KeybindBindings {
-  return Object.fromEntries(allKeybindActions().map(action => [action.id, [...action.defaults]]))
+  return Object.fromEntries(allKeybindActions().map(action => [action.id, resolveDefaults(action)]))
 }
 
 // Fixed, non-rebindable shortcuts surfaced read-only in the panel so the map is

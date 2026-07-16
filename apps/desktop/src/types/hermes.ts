@@ -219,6 +219,7 @@ export interface HermesConfig {
   voice?: {
     max_recording_seconds?: number
     auto_tts?: boolean
+    record_key?: string
   }
 }
 

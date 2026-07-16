@@ -15,7 +15,8 @@ import {
   KEYBIND_READONLY,
   type KeybindActionMeta,
   type KeybindReadonly,
-  KEYBINDS_AREA
+  KEYBINDS_AREA,
+  resolveDefaults
 } from '@/lib/keybinds/actions'
 import { formatCombo } from '@/lib/keybinds/combo'
 import { arraysEqual } from '@/lib/storage'
@@ -151,7 +152,7 @@ function KeybindRow({ action }: { action: KeybindActionMeta }) {
   const combos = bindingsFor(action.id, bindings)
   const capturing = capture === action.id
   const label = k.actions[action.id] ?? action.label ?? action.id
-  const isDefault = arraysEqual(combos, [...action.defaults])
+  const isDefault = arraysEqual(combos, resolveDefaults(action))
 
   const conflict = combos
     .flatMap(combo => conflictsFor(action.id, combo).map(other => k.actions[other] ?? other))

@@ -1,7 +1,7 @@
 import { atom, computed } from 'nanostores'
 
 import { $registryVersion } from '@/contrib/registry'
-import { allKeybindActions, defaultBindings, keybindAction, type KeybindBindings } from '@/lib/keybinds/actions'
+import { allKeybindActions, defaultBindings, keybindAction, type KeybindBindings, resolveDefaults } from '@/lib/keybinds/actions'
 import { canonicalizeCombo } from '@/lib/keybinds/combo'
 import { arraysEqual, persistString, storedString } from '@/lib/storage'
 
@@ -74,7 +74,13 @@ $bindings.subscribe(persistBindings)
 
 /** Live combos for an action: explicit binding → stored override → default. */
 export function bindingsFor(id: string, bindings: KeybindBindings = $bindings.get()): string[] {
-  return bindings[id] ?? storedOverrides[id] ?? [...(keybindAction(id)?.defaults ?? [])]
+  const stored = bindings[id] ?? storedOverrides[id]
+  if (stored !== undefined) {
+    return stored
+  }
+
+  const action = keybindAction(id)
+  return action ? resolveDefaults(action) : []
 }
 
 // Reverse lookup combo → actionId for dispatch. First action wins on conflict;
@@ -112,7 +118,7 @@ export function resetBinding(actionId: string): void {
     return
   }
 
-  $bindings.set({ ...$bindings.get(), [actionId]: [...action.defaults] })
+  $bindings.set({ ...$bindings.get(), [actionId]: resolveDefaults(action) })
 }
 
 export function resetAllBindings(): void {
