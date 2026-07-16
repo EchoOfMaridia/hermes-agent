@@ -18,17 +18,24 @@ def install_shift_enter_alias() -> int:
     fires for terminals that emit a distinct Shift+Enter.
 
     Sequences mapped:
-      - "\\x1b[13;2u"     — Kitty keyboard protocol / CSI-u, modifier=2 (Shift)
-      - "\\x1b[27;2;13~"  — xterm modifyOtherKeys=2, modifier=2 (Shift)
-      - "\\x1b[27;2;13u"  — alternate ordering some emitters use
+      - "\x1b[13;2u"     — Kitty keyboard protocol / CSI-u, modifier=2 (Shift)
+      - "\x1b[27;2;13~"  — xterm modifyOtherKeys=2, modifier=2 (Shift)
+      - "\x1b[27;2;13u"  — alternate ordering some emitters use
+      - "\x1bOM"         — Konsole (KDE) and macOS Terminal via DEC SS3 —
+                            `ESC O M` is the keypad-Enter sequence used
+                            unmodified for Shift+Return in konsole's
+                            default.keytab (`key Return+Shift : "\EOM"`).
+                            Stock prompt_toolkit only maps `\x1bOA` .. `\x1bOS`
+                            for arrow keys + F1-F4, leaving `\x1bOM` to fall
+                            through to literal character insertion.
 
     The CSI-u sequence is not in stock prompt_toolkit. The modifyOtherKeys
-    variant `\\x1b[27;2;13~` IS in stock prompt_toolkit but mapped to plain
+    variant `\x1b[27;2;13~` IS in stock prompt_toolkit but mapped to plain
     `Keys.ControlM` — i.e. Shift+Enter behaves identically to Enter, which
     is the very bug this helper exists to fix. We therefore overwrite
-    those two specific keys (and `\\x1b[27;2;13u`) unconditionally; other
-    `\\x1b[27;...;13~` sequences (Ctrl+Enter, Alt+Enter via modifyOtherKeys
-    variants 5/6/etc.) are left untouched.
+    those two specific keys (and `\x1b[27;2;13u` and `\x1bOM`) unconditionally;
+    other `\x1b[27;...;13~` sequences (Ctrl+Enter, Alt+Enter via
+    modifyOtherKeys variants 5/6/etc.) are left untouched.
 
     Default macOS Terminal and stock Windows Terminal still send the same
     byte for Enter and Shift+Enter, so there is no fix for those terminals
@@ -44,7 +51,7 @@ def install_shift_enter_alias() -> int:
 
     alt_enter = (Keys.Escape, Keys.ControlM)
     changed = 0
-    for seq in ("\x1b[13;2u", "\x1b[27;2;13~", "\x1b[27;2;13u"):
+    for seq in ("\x1b[13;2u", "\x1b[27;2;13~", "\x1b[27;2;13u", "\x1bOM"):
         if ANSI_SEQUENCES.get(seq) != alt_enter:
             ANSI_SEQUENCES[seq] = alt_enter
             changed += 1

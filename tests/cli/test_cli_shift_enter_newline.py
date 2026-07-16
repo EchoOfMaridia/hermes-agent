@@ -19,6 +19,7 @@ SHIFT_ENTER_SEQUENCES = (
     "\x1b[13;2u",      # Kitty / CSI-u, modifier=2 (Shift)
     "\x1b[27;2;13~",   # xterm modifyOtherKeys=2
     "\x1b[27;2;13u",
+    "\x1bOM",          # Konsole / DEC SS3 — Return key prefix `O` + `M` (Enter)
 )
 
 
@@ -86,3 +87,18 @@ def test_plain_enter_remains_distinct_from_alt_enter():
     assert enter != alt_enter
     assert len(enter) == 1
     assert len(alt_enter) == 2
+
+
+def test_konsole_ss3_shift_enter_parses_as_alt_enter():
+    """Konsole 25.x (and macOS keytab) emit Shift+Enter as ``\\\\x1bOM``,
+    the DEC SS3 sequence ``ESC O M`` — bare-CSI form for the keypad Enter
+    key. Stock prompt_toolkit does not map it (only ``\\\\x1bOA``..``\\\\x1bOS``
+    for arrow keys + F1-F4 exist); without the alias the keystroke falls
+    through to literal character insertion and the newline handler never
+    fires. See kde/konsole data/keyboard-layouts/default.keytab line 34."""
+    alt_enter = _parse("\x1b\r")
+    konsole_shift_enter = _parse("\x1bOM")
+    assert konsole_shift_enter == alt_enter, (
+        f"Konsole Shift+Enter via SS3 should parse identically to Alt+Enter; "
+        f"got {konsole_shift_enter!r} vs {alt_enter!r}"
+    )

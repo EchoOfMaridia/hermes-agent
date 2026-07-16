@@ -14242,6 +14242,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
             from hermes_cli.voice import (
                 normalize_voice_record_key_for_prompt_toolkit,
                 voice_record_key_from_config,
+                _VOICE_RESERVED_PT_KEYS,
             )
             _raw_key = voice_record_key_from_config(load_config())
             _voice_key = normalize_voice_record_key_for_prompt_toolkit(_raw_key)
@@ -14254,6 +14255,29 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
                     "voice.record_key %r uses a TUI-only modifier (super/win); "
                     "CLI fell back to Ctrl+B. Use ctrl+<key> or alt+<key> for "
                     "cross-runtime parity.",
+                    _raw_key,
+                )
+            # Warn when the configured key collides with the prompt's submit
+            # binding. ``Keys.Enter`` is literally ``Keys.ControlM`` (``c-m``)
+            # and bare POSIX also binds ``c-j`` for LF-submitting terminals;
+            # a voice binding on either would silently shadow with submit
+            # (prompt_toolkit fires both stacked handlers and the
+            # ``_agent_running`` guard swallows the voice side). Surfaces in
+            # /voice status as the documented Ctrl+B default — the warning
+            # makes the fallback visible so the user knows their config was
+            # rejected rather than silently active.
+            elif (
+                isinstance(_raw_key, str)
+                and _raw_key.strip()
+                and normalize_voice_record_key_for_prompt_toolkit(_raw_key)
+                in _VOICE_RESERVED_PT_KEYS
+                and _voice_key == "c-b"
+            ):
+                logger.warning(
+                    "voice.record_key %r collides with the prompt's Enter/submit "
+                    "binding (prompt_toolkit fires both handlers stacked, so "
+                    "submit shadows voice). CLI fell back to Ctrl+B. Pick a "
+                    "different shortcut — e.g. ctrl+o, ctrl+r, ctrl+space.",
                     _raw_key,
                 )
         except Exception:

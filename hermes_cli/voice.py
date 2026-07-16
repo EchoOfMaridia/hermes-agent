@@ -72,6 +72,18 @@ _VOICE_NAMED_KEYS = {
 # never fire push-to-talk — the same blocklist the TUI parser uses.
 _VOICE_RESERVED_CTRL_CHARS = frozenset({"c", "d", "l"})
 
+# prompt_toolkit sequences that the prompt's submit binding claims in
+# ``_bind_prompt_submit_keys`` (``cli.py``): ``Keys.Enter`` is literally
+# ``Keys.ControlM`` (``"c-m"``), and on bare POSIX the same function also
+# binds ``"c-j"`` for LF-submitting terminals. Without this blocklist the
+# voice handler stacks on top of the submit handler — prompt_toolkit fires
+# both, the submit sets ``_agent_running=True``, and the voice handler's
+# ``if _agent_running: return`` guard silently swallows the recording
+# request. User sees ``ctrl+m`` / ``ctrl+j`` "do nothing for voice." Match
+# the TUI parser's rejection so the CLI never advertises a shortcut that
+# will be silently shadowed by submit.
+_VOICE_RESERVED_PT_KEYS = frozenset({"c-m", "c-j"})
+
 # On macOS the classic CLI's prompt_toolkit bindings for copy / exit /
 # clear also claim ``a-c`` / ``a-d`` / ``a-l`` via the action-modifier
 # lookup, and hermes-ink reports Alt as ``key.meta`` on many terminals.
@@ -160,7 +172,10 @@ def normalize_voice_record_key_for_prompt_toolkit(raw: Any) -> str:
         return _DEFAULT_PT_KEY
 
     # Single-char key: reject reserved-ctrl chords that the TUI would
-    # also block at parse time, plus the mac-only alt reservation.
+    # also block at parse time, plus the mac-only alt reservation, plus
+    # the submit-collision set (c-m / c-j — the prompt's submit binding
+    # already owns these sequences and a stacked voice handler would be
+    # silently shadowed).
     if len(key_token) == 1:
         if normalized_mod == "c-" and key_token in _VOICE_RESERVED_CTRL_CHARS:
             return _DEFAULT_PT_KEY
@@ -169,6 +184,8 @@ def normalize_voice_record_key_for_prompt_toolkit(raw: Any) -> str:
             and sys.platform == "darwin"
             and key_token in _VOICE_RESERVED_ALT_CHARS_MAC
         ):
+            return _DEFAULT_PT_KEY
+        if f"{normalized_mod}{key_token}" in _VOICE_RESERVED_PT_KEYS:
             return _DEFAULT_PT_KEY
         return f"{normalized_mod}{key_token}"
 
@@ -179,7 +196,19 @@ def normalize_voice_record_key_for_prompt_toolkit(raw: Any) -> str:
     if not named:
         return _DEFAULT_PT_KEY
 
-    return f"{normalized_mod}{named}"
+    normalized = f"{normalized_mod}{named}"
+
+    # Reject sequences the prompt's submit binding already owns
+    # (c-m via ``Keys.Enter``; c-j on bare POSIX). Allowing them would
+    # silently shadow the voice handler with the submit handler —
+    # prompt_toolkit fires both stacked bindings, submit runs first,
+    # and the voice handler's ``if _agent_running: return`` guard
+    # swallows the rest. Mirror the TUI parser's rejection so
+    # ``/voice status`` never advertises a shortcut that won't fire.
+    if normalized in _VOICE_RESERVED_PT_KEYS:
+        return _DEFAULT_PT_KEY
+
+    return normalized
 
 
 def format_voice_record_key_for_status(raw: Any) -> str:

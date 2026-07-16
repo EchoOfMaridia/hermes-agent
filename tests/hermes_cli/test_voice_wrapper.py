@@ -133,6 +133,28 @@ class TestNormalizeVoiceRecordKeyForPromptToolkit:
         assert normalize_voice_record_key_for_prompt_toolkit("ctrl+d") == "c-b"
         assert normalize_voice_record_key_for_prompt_toolkit("ctrl+l") == "c-b"
 
+    def test_submit_collisions_fall_back(self):
+        """``ctrl+m`` and ``ctrl+j`` collide with the prompt's submit
+        binding (``Keys.Enter`` is literally ``Keys.ControlM``; bare
+        POSIX also binds ``c-j`` for LF-submitting terminals). Without
+        this rejection the voice handler stacks on top of submit —
+        prompt_toolkit fires both, submit sets ``_agent_running=True``,
+        and the voice handler's guard silently bails. Mirror the TUI
+        parser's rejection so ``/voice status`` never advertises a
+        shortcut that will be silently shadowed."""
+        from hermes_cli.voice import normalize_voice_record_key_for_prompt_toolkit
+
+        # The user's reported case.
+        assert normalize_voice_record_key_for_prompt_toolkit("ctrl+m") == "c-b"
+        # Aliases / named-key spellings that all normalize to c-m.
+        assert normalize_voice_record_key_for_prompt_toolkit("control+m") == "c-b"
+        # The other submit-claimed sequence on bare POSIX.
+        assert normalize_voice_record_key_for_prompt_toolkit("ctrl+j") == "c-b"
+        # Alt-form should not be blocked — Alt+Enter is a separate two-key
+        # sequence, not a single a-enter binding.
+        assert normalize_voice_record_key_for_prompt_toolkit("alt+m") == "a-m"
+        assert normalize_voice_record_key_for_prompt_toolkit("alt+o") == "a-o"
+
     def test_unknown_modifier_falls_back(self):
         """``meta+b`` is ambiguous on the wire (Alt on xterm, Cmd on
         legacy macOS), same class as the TUI parser's rejection."""
