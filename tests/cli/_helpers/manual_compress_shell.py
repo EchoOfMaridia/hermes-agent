@@ -66,7 +66,10 @@ def build_test_shell(agent_response=None, agent_sentinel=None):
     agent.tools = None
     agent.session_id = "new-session"
     agent._compress_context.return_value = agent_response
-    agent._flush_messages_to_session_db = lambda *a, **k: None
+    # _flush_messages_to_session_db left as auto-Mock so post-merge
+    # state-change tests (assert_called_once_with / assert_not_called)
+    # can verify it. The pre-merge helper overrode this with a no-op
+    # lambda which made those assertions impossible — reverted.
     cli.agent = agent
     cli.session_id = "old-session"
     cli._pending_title = "old title"
