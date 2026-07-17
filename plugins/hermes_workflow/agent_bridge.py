@@ -62,23 +62,36 @@ class AgentResponse:
     """Result of an ask_agent call. Returned to the workflow step.
 
     Attributes:
-        text:       Final text response from the agent.
-        tool_calls: Tuple of structured tool-call records invoked during
-                    the response. Each entry is a dict with keys:
-                      - ``name``:   str — tool name (e.g., "terminal",
-                                    "file_edit", "search")
-                      - ``args``:   dict — arguments passed to the tool
-                      - ``result``: str — result returned by the tool
-                                    (may be empty string for tools that
-                                    produce no output)
-                    Legacy v0.1.0 callers stored ``tool_calls`` as a
-                    tuple of strings (just names). The new contract is
-                    ``tuple[dict, ...]`` — downstream consumers that read
-                    ``r.tool_calls[0]["name"]`` will fail loudly on the
-                    legacy shape, which is the intended migration signal.
-        tokens_in:  Input tokens consumed.
-        tokens_out: Output tokens produced.
-        duration:   Wall-clock seconds.
+        text:         Final text response from the agent.
+        tool_calls:   Tuple of structured tool-call records invoked during
+                      the response. Each entry is a dict with keys:
+                        - ``name``:   str — tool name (e.g., "terminal",
+                                      "file_edit", "search")
+                        - ``args``:   dict — arguments passed to the tool
+                        - ``result``: str — result returned by the tool
+                                      (may be empty string for tools that
+                                      produce no output)
+                      Legacy v0.1.0 callers stored ``tool_calls`` as a
+                      tuple of strings (just names). The new contract is
+                      ``tuple[dict, ...]`` — downstream consumers that read
+                      ``r.tool_calls[0]["name"]`` will fail loudly on the
+                      legacy shape, which is the intended migration signal.
+        tokens_in:    Input tokens consumed.
+        tokens_out:   Output tokens produced.
+        duration:     Wall-clock seconds.
+        parsed:       Optional parsed structured-output object. Populated
+                      when the bridge was called with json_schema= and the
+                      response was successfully parsed against the schema.
+                      None when no schema was requested OR parsing failed
+                      (in which case the failure is journaled but the
+                      bridge does not raise — the workflow author can
+                      still inspect r.text directly). Use
+                      ``ctx.runtime.parse_structured(r, schema=...)`` to
+                      retry the parse with a different schema.
+        content_type: "json" when parsed is set (parse succeeded);
+                      "text" otherwise. Mirrors
+                      ``PluginLlmStructuredResult.content_type`` so callers
+                      have a single uniform shape.
     """
 
     text: str
@@ -86,6 +99,8 @@ class AgentResponse:
     tokens_in: int = 0
     tokens_out: int = 0
     duration: float = 0.0
+    parsed: Any | None = None
+    content_type: str = "text"
 
 
 class AgentBridge:
@@ -101,7 +116,9 @@ class AgentBridge:
                      max_tokens: int | None,
                      tools: list[dict] | None = None,
                      session_key: str | None = None,
-                     system_prompt: str | None = None) -> AgentResponse:
+                     system_prompt: str | None = None,
+                     json_schema: dict | None = None,
+                     schema_name: str | None = None) -> AgentResponse:
         """Invoke the agent. Override in subclasses.
 
         Args:
@@ -110,8 +127,8 @@ class AgentBridge:
                            None = use the runtime default.
             max_tokens:    Optional cap on response tokens.
             tools:         Optional list of tool definitions to expose
-                           to the agent during this call. Each entry is
-                           a dict with ``name``, ``description``, and
+                           to the agent during this call. Each entry is a
+                           dict with ``name``, ``description``, and
                            ``schema`` (JSON Schema for the tool's args).
                            When provided, the agent can call these tools
                            and the resulting tool_calls appear on the
@@ -129,9 +146,25 @@ class AgentBridge:
                            threading.
             system_prompt: Optional system prompt override for this
                            call. None = use the inner bridge default.
+            json_schema:   Optional JSON Schema describing the structured
+                           output the caller wants. When provided, the
+                           bridge SHOULD request JSON-mode or
+                           json_schema-mode from the provider (wire-level
+                           enforcement when supported), AND SHOULD
+                           populate the returned ``AgentResponse.parsed``
+                           with the deserialized object. Bridges that
+                           cannot do wire-level enforcement (e.g. the
+                           subprocess ``HermesChatBridge``) MUST paste
+                           the schema into the prompt as a fallback.
+                           None = unstructured text (v0.1.0 behaviour).
+            schema_name:   Optional human-readable name for the schema.
+                           Used by the wire-format layer to label the
+                           schema constraint. Defaults to None.
 
         Returns:
-            AgentResponse with the final text and metadata.
+            AgentResponse with the final text, parsed object (when
+            json_schema is set and parsing succeeded), content_type
+            ("json" or "text"), and metadata.
 
         Raises:
             NotImplementedError: by default; subclasses override.
@@ -169,7 +202,9 @@ class JournalingBridge(AgentBridge):
                      max_tokens: int | None,
                      tools: list[dict] | None = None,
                      session_key: str | None = None,
-                     system_prompt: str | None = None) -> AgentResponse:
+                     system_prompt: str | None = None,
+                     json_schema: dict | None = None,
+                     schema_name: str | None = None) -> AgentResponse:
         from .dsl.primitives import get_current_run
         from .journal import Journal
 
@@ -196,6 +231,11 @@ class JournalingBridge(AgentBridge):
         #   preview is NOT journaled even when opt-in is set —
         #   system prompts are operational, not user data, but the
         #   full text is rarely needed for verification.
+        # - schema_name + has_json_schema: structured-output contract
+        #   for this call. Verifiers use these to correlate the
+        #   agent_response's parsed_shape against the requested
+        #   schema. has_json_schema is True iff json_schema is set;
+        #   schema_name may be None when the caller didn't supply one.
         if run is not None:
             call_index = run.next_agent_call_index()
             run.journal.append({
@@ -210,6 +250,8 @@ class JournalingBridge(AgentBridge):
                 "tools_count": len(tools) if tools else 0,
                 "session_key": session_key,
                 "system_prompt_chars": len(system_prompt) if system_prompt else 0,
+                "schema_name": schema_name,
+                "has_json_schema": json_schema is not None,
             })
             run.touch()
 
@@ -224,6 +266,7 @@ class JournalingBridge(AgentBridge):
             prompt=prompt, model=model, max_tokens=max_tokens,
             tools=tools, session_key=session_key,
             system_prompt=system_prompt,
+            json_schema=json_schema, schema_name=schema_name,
         )
 
         # Record the agent_response event. Tool calls are journaled as
@@ -252,6 +295,18 @@ class JournalingBridge(AgentBridge):
                         "args": {},
                         "result_chars": 0,
                     })
+            # parsed_shape captures the SHAPE of the structured-output
+            # payload — dict keys, "<list>" sentinel for arrays, or
+            # the type name for scalars. Never values (the journal
+            # stays privacy-preserving and small).
+            parsed_shape: list[str] = []
+            if response.parsed is not None:
+                if isinstance(response.parsed, dict):
+                    parsed_shape = list(response.parsed.keys())
+                elif isinstance(response.parsed, list):
+                    parsed_shape = ["<list>"]
+                else:
+                    parsed_shape = [type(response.parsed).__name__]
             run.journal.append({
                 "kind": Journal.KIND_AGENT_RESPONSE,
                 "run_id": run.run_id,
@@ -263,6 +318,8 @@ class JournalingBridge(AgentBridge):
                 "duration": time.time() - start,
                 "text_chars": len(response.text),
                 "text_preview": _prompt_preview(response.text),
+                "content_type": response.content_type,
+                "parsed_shape": parsed_shape,
             })
             run.touch()
 
