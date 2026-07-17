@@ -281,7 +281,7 @@ class TestAskAgentFallbackWhenNoBridge:
         from plugins.hermes_workflow.runtime_factory import build_runtime
 
         class _InnerBridge(AgentBridge):
-            async def invoke(self, *, prompt, model, max_tokens):
+            async def invoke(self, *, prompt, model, max_tokens, json_schema=None, schema_name=None):
                 return AgentResponse(
                     text=f"inner says: {prompt!r}",
                     tool_calls=("tool1",),

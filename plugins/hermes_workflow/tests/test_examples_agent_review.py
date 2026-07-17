@@ -56,7 +56,8 @@ class _StepRecordingBridge(AgentBridge):
         self._behavior = behavior
 
     async def invoke(self, *, prompt, model, max_tokens,
-                     tools=None, session_key=None, system_prompt=None):
+                     tools=None, session_key=None, system_prompt=None,
+                     json_schema=None, schema_name=None):
         self.calls.append({
             "prompt": prompt,
             "model": model,
@@ -297,7 +298,8 @@ class TestAgentReviewVerifiers:
         # We override the happy-path for investigate specifically.
         class _NoTerminalInInvestigate(_StepRecordingBridge):
             async def invoke(self, *, prompt, model, max_tokens,
-                             tools=None, session_key=None, system_prompt=None):
+                             tools=None, session_key=None, system_prompt=None,
+                     json_schema=None, schema_name=None):
                 step = _classify_step(prompt, system_prompt)
                 # Don't override — let the parent's logic handle it,
                 # but force investigate to return no tool_calls.

@@ -86,7 +86,8 @@ class TestJournalingBridge:
         class StubBridge(AgentBridge):
             async def invoke(self, *, prompt, model, max_tokens,
                              tools=None, session_key=None,
-                             system_prompt=None):
+                             system_prompt=None,
+                 json_schema=None, schema_name=None):
                 return AgentResponse(text=f"echo: {prompt}",
                                      tokens_in=10, tokens_out=5)
 
@@ -101,13 +102,15 @@ class TestJournalingBridge:
         class FirstBridge(AgentBridge):
             async def invoke(self, *, prompt, model, max_tokens,
                              tools=None, session_key=None,
-                             system_prompt=None):
+                             system_prompt=None,
+                 json_schema=None, schema_name=None):
                 return AgentResponse(text="first")
 
         class SecondBridge(AgentBridge):
             async def invoke(self, *, prompt, model, max_tokens,
                              tools=None, session_key=None,
-                             system_prompt=None):
+                             system_prompt=None,
+                 json_schema=None, schema_name=None):
                 return AgentResponse(text="second")
 
         bridge = JournalingBridge(inner=FirstBridge())
@@ -132,7 +135,8 @@ class TestRuntimeAskAgent:
         class StubBridge(AgentBridge):
             async def invoke(self, *, prompt, model, max_tokens,
                              tools=None, session_key=None,
-                             system_prompt=None):
+                             system_prompt=None,
+                 json_schema=None, schema_name=None):
                 return AgentResponse(text=f"got: {prompt}",
                                      tool_calls=("Read",))
 
@@ -150,7 +154,8 @@ class TestRuntimeAskAgent:
         class StubBridge(AgentBridge):
             async def invoke(self, *, prompt, model, max_tokens,
                              tools=None, session_key=None,
-                             system_prompt=None):
+                             system_prompt=None,
+                 json_schema=None, schema_name=None):
                 return AgentResponse(text="analysis result",
                                      tool_calls=("Read", "Grep"),
                                      tokens_in=42, tokens_out=17)

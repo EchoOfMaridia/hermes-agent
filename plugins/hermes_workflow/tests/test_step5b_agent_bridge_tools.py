@@ -100,7 +100,8 @@ class _RecordingBridge(AgentBridge):
         self._response_tokens_out = response_tokens_out
 
     async def invoke(self, *, prompt, model, max_tokens,
-                     tools=None, session_key=None, system_prompt=None) -> AgentResponse:
+                     tools=None, session_key=None, system_prompt=None,
+                     json_schema=None, schema_name=None) -> AgentResponse:
         self.calls.append({
             "prompt": prompt,
             "model": model,

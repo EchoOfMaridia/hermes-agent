@@ -40,6 +40,7 @@ claude-sonnet 4 review of a 1-2 MB JSON file).
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import shutil
 import subprocess
@@ -52,6 +53,8 @@ from .agent_bridge import AgentBridge, AgentResponse
 
 #: Default timeout for a single LLM call (seconds).
 _DEFAULT_TIMEOUT_S = 300.0
+
+_log = logging.getLogger(__name__)
 
 
 def _find_hermes_binary() -> str | None:
@@ -105,6 +108,8 @@ class HermesChatBridge(AgentBridge):
         tools: list[dict] | None = None,
         session_key: str | None = None,
         system_prompt: str | None = None,
+        json_schema: dict | None = None,
+        schema_name: str | None = None,
     ) -> AgentResponse:
         """Run ``hermes chat -q <prompt>`` and return its response.
 
@@ -112,12 +117,37 @@ class HermesChatBridge(AgentBridge):
         signature compatibility with ``AgentBridge.invoke`` but are not
         honoured by this minimal bridge. The subprocess always runs in
         one-shot non-interactive mode (``-q`` + ``-Q``).
+
+        Structured-output handling: the subprocess boundary cannot carry
+        wire-level response_format, so when ``json_schema`` is supplied
+        the schema is pasted into the prompt as text alongside a
+        JSON-only directive. The returned ``AgentResponse.parsed`` is
+        populated by post-processing the subprocess stdout through
+        ``structured_output.parse_structured`` so callers don't need to
+        re-parse manually.
         """
-        # Compose the full prompt: system_prompt (if any) + user prompt.
+        # Compose the full prompt: system_prompt (if any) + user prompt
+        # + optional structured-output directive.
         full_prompt_parts: list[str] = []
         if system_prompt:
             full_prompt_parts.append(f"[system]\n{system_prompt}\n[/system]\n")
         full_prompt_parts.append(prompt)
+
+        if json_schema is not None:
+            import json as _json
+            schema_text = _json.dumps(
+                json_schema, ensure_ascii=False, sort_keys=True
+            )
+            schema_label = schema_name or "UnnamedSchema"
+            full_prompt_parts.append(
+                "\n\n[Structured Output]\n"
+                f"Respond with a single JSON object matching the schema "
+                f"below.\n"
+                f"Do not include prose, code fences, or markdown.\n"
+                f"Schema name: {schema_label}\n"
+                f"JSON schema:\n{schema_text}\n"
+            )
+
         full_prompt = "\n".join(full_prompt_parts)
 
         # Build argv. -q sets the prompt, -Q suppresses banner/spinner
@@ -168,12 +198,37 @@ class HermesChatBridge(AgentBridge):
         approx_in = len(full_prompt) // 4
         approx_out = len(stdout) // 4
 
+        # Post-process the subprocess output: if a schema was requested,
+        # try to parse the subprocess stdout into a structured payload.
+        # The subprocess boundary cannot carry wire-level response_format,
+        # so this is best-effort — operators wanting strict enforcement
+        # should use the in-process PluginLlmBridge via runtime_factory.
+        parsed: Any | None = None
+        content_type: str = "text"
+        if json_schema is not None and stdout:
+            from .structured_output import parse_structured as _parse
+            try:
+                parsed = _parse(stdout, schema=json_schema)
+                content_type = "json" if parsed is not None else "text"
+            except Exception as exc:
+                # Schema validation failure inside the bridge is logged
+                # but does NOT raise — the workflow author can re-parse
+                # via ctx.runtime.parse_structured. The text is still
+                # available on response.text for inspection.
+                _log.warning(
+                    "HermesChatBridge: subprocess output failed schema "
+                    "validation; returning text-only response: %s",
+                    exc,
+                )
+
         return AgentResponse(
             text=stdout,
             tool_calls=(),
             tokens_in=approx_in,
             tokens_out=approx_out,
             duration=duration,
+            parsed=parsed,
+            content_type=content_type,
         )
 
 

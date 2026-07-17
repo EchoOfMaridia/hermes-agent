@@ -105,6 +105,12 @@ def register(ctx) -> None:
     plugin_name = manifest.name if manifest else "hermes_workflow"
     _log.info("registering hermes_workflow plugin (name=%s)", plugin_name)
 
+    # Capture ctx.llm so runtime_factory.build_runtime can wire the
+    # in-process PluginLlmBridge when the plugin is loaded inside an
+    # active Hermes session.
+    from plugins.hermes_workflow.runtime_factory import _capture_plugin_llm
+    _capture_plugin_llm(getattr(ctx, "llm", None))
+
     # The runtime singleton lives for the lifetime of the hermes process.
     runtime = build_runtime()
 
