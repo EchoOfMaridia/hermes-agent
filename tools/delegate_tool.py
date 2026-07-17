@@ -2527,14 +2527,18 @@ def delegate_task(
             )
             # Override with correct parent tool names (before child construction mutated global)
             child._delegate_saved_tool_names = _parent_tool_names
-            children.append((i, t, child))
+            children.append((i, t, task_creds, child))
     finally:
         # Authoritative restore: reset global to parent's tool names after all children built
         _model_tools._last_resolved_tool_names = _parent_tool_names
 
     if n_tasks == 1:
         # Single task -- run directly (no thread pool overhead)
-        _i, _t, child = children[0]
+        # task_creds is unpacked for the background-dispatch path below so the
+        # user's explicit per-task ``model=...`` request rides on the durable
+        # delegation record and the gateway subagent.* events the desktop
+        # panel subscribes to (otherwise the panel shows model=<parent default>).
+        _i, _t, task_creds, child = children[0]  # noqa: F841 (task_creds)
 
         # ----- Async / background dispatch -----
         # When background=true, hand the already-built child to the async
@@ -2589,7 +2593,14 @@ def delegate_task(
                 context=_t.get("context"),
                 toolsets=_t.get("toolsets") or toolsets,
                 role=_normalize_role(_t.get("role") or top_role),
-                model=creds["model"],
+                # Persist the resolved per-task model (not the parent creds),
+                # otherwise explicit per-task ``model=...`` requests are
+                # silently lost from the durable delegation record AND from
+                # the gateway subagent.* events the desktop subagents panel
+                # subscribes to. Without this fix the panel shows every
+                # subagent as model=<parent default>, no matter which model
+                # was actually requested.
+                model=task_creds["model"],
                 session_key=_session_key,
                 runner=_async_runner,
                 interrupt_fn=_async_interrupt,
