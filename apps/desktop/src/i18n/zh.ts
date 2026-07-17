@@ -1199,7 +1199,10 @@ export const zh: Translations = {
     stepPending: '等待开始…',
     verifier: verdict => (verdict === 'pass' ? '验证通过' : '验证拒绝'),
     error: message => `错误: ${message}`,
-    haltReason: reason => `停止原因: ${reason}`
+    haltReason: reason => `停止原因: ${reason}`,
+    subagentTitle: subagentId => `子代理 ${subagentId}`,
+    subagentClose: '关闭',
+    subagentMoreFiles: count => `+${count} 个文件`
   },
 
   commandCenter: {

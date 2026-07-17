@@ -953,7 +953,10 @@ export const zhHant = defineLocale({
     stepPending: '等待開始…',
     verifier: verdict => (verdict === 'pass' ? '驗證通過' : '驗證拒絕'),
     error: message => `錯誤: ${message}`,
-    haltReason: reason => `停止原因: ${reason}`
+    haltReason: reason => `停止原因: ${reason}`,
+    subagentTitle: subagentId => `子代理 ${subagentId}`,
+    subagentClose: '關閉',
+    subagentMoreFiles: count => `+${count} 個檔案`
   },
 
   commandCenter: {

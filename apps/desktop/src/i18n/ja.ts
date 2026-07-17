@@ -981,7 +981,10 @@ export const ja = defineLocale({
     stepPending: '開始を待機中…',
     verifier: verdict => (verdict === 'pass' ? '検証パス' : '検証却下'),
     error: message => `エラー: ${message}`,
-    haltReason: reason => `停止: ${reason}`
+    haltReason: reason => `停止: ${reason}`,
+    subagentTitle: subagentId => `サブエージェント ${subagentId}`,
+    subagentClose: '閉じる',
+    subagentMoreFiles: count => `+${count} 件のファイル`
   },
 
   commandCenter: {

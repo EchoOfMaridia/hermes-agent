@@ -1017,7 +1017,10 @@ export const en: Translations = {
     stepPending: 'Waiting to start…',
     verifier: verdict => (verdict === 'pass' ? 'verifier passed' : 'verifier rejected'),
     error: message => `Error: ${message}`,
-    haltReason: reason => `Halted: ${reason}`
+    haltReason: reason => `Halted: ${reason}`,
+    subagentTitle: subagentId => `Subagent ${subagentId}`,
+    subagentClose: 'Close',
+    subagentMoreFiles: count => `+${count} more files`
   },
 
   commandCenter: {

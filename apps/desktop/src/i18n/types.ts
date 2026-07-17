@@ -896,6 +896,9 @@ export interface Translations {
     verifier: (verdict: 'pass' | 'fail') => string
     error: (message: string) => string
     haltReason: (reason: string) => string
+    subagentTitle: (subagentId: string) => string
+    subagentClose: string
+    subagentMoreFiles: (count: number) => string
   }
 
   commandCenter: {
