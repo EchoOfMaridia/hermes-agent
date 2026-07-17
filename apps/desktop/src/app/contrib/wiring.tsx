@@ -82,6 +82,7 @@ import { useModelControls } from '../session/hooks/use-model-controls'
 import { usePreviewRouting } from '../session/hooks/use-preview-routing'
 import { usePromptActions } from '../session/hooks/use-prompt-actions'
 import { useRouteResume } from '../session/hooks/use-route-resume'
+import { dispatchWorkflowEvent, useWorkflowEvents } from '../session/hooks/use-workflow-events'
 import { useSessionActions } from '../session/hooks/use-session-actions'
 import { useSessionListActions } from '../session/hooks/use-session-list-actions'
 import { useSessionStateCache } from '../session/hooks/use-session-state-cache'
@@ -589,12 +590,20 @@ export function ContribWiring({ children }: { children: ReactNode }) {
 
   // Plugins hear the stream FIRST (isolated fan-out in contrib/events), then
   // the app dispatches as before — a plugin listener can't affect app flow.
+  // Workflow events flow through dispatchWorkflowEvent which writes into the
+  // $workflowRuns store; the Workflows panel UI subscribes to that atom.
+  const workflowRouter = useWorkflowEvents()
   const handleGatewayEventWithPlugins = useCallback(
     (event: Parameters<typeof handleDesktopGatewayEvent>[0]) => {
       emitGatewayEvent(event)
       handleDesktopGatewayEvent(event)
+      dispatchWorkflowEvent(workflowRouter, {
+        type: String(event.type),
+        session_id: event.session_id,
+        payload: event.payload as Record<string, unknown>,
+      })
     },
-    [handleDesktopGatewayEvent]
+    [handleDesktopGatewayEvent, workflowRouter]
   )
 
   useGatewayBoot({
