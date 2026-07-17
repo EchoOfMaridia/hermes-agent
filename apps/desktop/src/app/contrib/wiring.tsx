@@ -111,6 +111,7 @@ const CronView = lazy(async () => ({ default: (await import('../cron')).CronView
 const ProfilesView = lazy(async () => ({ default: (await import('../profiles')).ProfilesView }))
 const SettingsView = lazy(async () => ({ default: (await import('../settings')).SettingsView }))
 const StarmapView = lazy(async () => ({ default: (await import('../starmap')).StarmapView }))
+const WorkflowsView = lazy(async () => ({ default: (await import('../workflows')).WorkflowsView }))
 
 // Surfaces (the four wired panes), the render context + WiredPane, and the
 // WiringActions/WiringApi contracts all live in sibling modules — this file is
@@ -920,6 +921,12 @@ export function ContribWiring({ children }: { children: ReactNode }) {
       {agentsOpen && (
         <Suspense fallback={null}>
           <AgentsView onClose={closeOverlayToPreviousRoute} />
+        </Suspense>
+      )}
+
+      {workflowsOpen && (
+        <Suspense fallback={null}>
+          <WorkflowsView onClose={closeOverlayToPreviousRoute} />
         </Suspense>
       )}
 
