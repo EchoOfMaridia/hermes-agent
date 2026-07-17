@@ -1179,6 +1179,29 @@ export const zh: Translations = {
     tokens: value => `${value} 词元`
   },
 
+  workflows: {
+    title: '工作流',
+    subtitle: count => `启动以来 ${count} 次运行`,
+    emptyTitle: '尚无工作流运行',
+    emptyDesc: '/workflow create 或 call_workflow 工具启动后，将在此实时显示。',
+    running: '运行中',
+    failed: '失败',
+    verified: '已验证',
+    pending: '等待中',
+    cancelled: '已取消',
+    halted: '已停止',
+    unknownWorkflow: '未命名工作流',
+    steps: count => `${count} 个步骤`,
+    state: state => `状态: ${state}`,
+    durationSeconds: seconds => `${seconds} 秒`,
+    durationMinutes: (minutes, seconds) => `${minutes} 分 ${seconds} 秒`,
+    stepState: state => state,
+    stepPending: '等待开始…',
+    verifier: verdict => (verdict === 'pass' ? '验证通过' : '验证拒绝'),
+    error: message => `错误: ${message}`,
+    haltReason: reason => `停止原因: ${reason}`
+  },
+
   commandCenter: {
     close: '关闭命令中心',
     paletteTitle: '命令面板',

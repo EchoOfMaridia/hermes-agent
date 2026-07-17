@@ -933,6 +933,29 @@ export const zhHant = defineLocale({
     tokens: value => `${value} 詞元`
   },
 
+  workflows: {
+    title: '工作流程',
+    subtitle: count => `啟動以來 ${count} 次執行`,
+    emptyTitle: '尚無工作流程執行',
+    emptyDesc: '/workflow create 或 call_workflow 工具啟動後，將在此即時顯示。',
+    running: '執行中',
+    failed: '失敗',
+    verified: '已驗證',
+    pending: '等待中',
+    cancelled: '已取消',
+    halted: '已停止',
+    unknownWorkflow: '未命名工作流程',
+    steps: count => `${count} 個步驟`,
+    state: state => `狀態: ${state}`,
+    durationSeconds: seconds => `${seconds} 秒`,
+    durationMinutes: (minutes, seconds) => `${minutes} 分 ${seconds} 秒`,
+    stepState: state => state,
+    stepPending: '等待開始…',
+    verifier: verdict => (verdict === 'pass' ? '驗證通過' : '驗證拒絕'),
+    error: message => `錯誤: ${message}`,
+    haltReason: reason => `停止原因: ${reason}`
+  },
+
   commandCenter: {
     close: '關閉命令中心',
     paletteTitle: '命令面板',

@@ -997,6 +997,29 @@ export const en: Translations = {
     tokens: value => `${value} tok`
   },
 
+  workflows: {
+    title: 'Workflows',
+    subtitle: count => `${count} ${count === 1 ? 'run' : 'runs'} since boot`,
+    emptyTitle: 'No workflow runs yet',
+    emptyDesc: 'When a /workflow create or call_workflow tool starts a run, it appears here in real time.',
+    running: 'Running',
+    failed: 'Failed',
+    verified: 'Verified',
+    pending: 'Pending',
+    cancelled: 'Cancelled',
+    halted: 'Halted',
+    unknownWorkflow: 'unnamed workflow',
+    steps: count => `${count} ${count === 1 ? 'step' : 'steps'}`,
+    state: state => state,
+    durationSeconds: seconds => `${seconds}s`,
+    durationMinutes: (minutes, seconds) => `${minutes}m ${seconds}s`,
+    stepState: state => state,
+    stepPending: 'Waiting to start…',
+    verifier: verdict => (verdict === 'pass' ? 'verifier passed' : 'verifier rejected'),
+    error: message => `Error: ${message}`,
+    haltReason: reason => `Halted: ${reason}`
+  },
+
   commandCenter: {
     close: 'Close command center',
     paletteTitle: 'Command palette',

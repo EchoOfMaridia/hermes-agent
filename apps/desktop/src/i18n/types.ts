@@ -875,6 +875,29 @@ export interface Translations {
     tokens: (value: number | string) => string
   }
 
+  workflows: {
+    title: string
+    subtitle: (count: number) => string
+    emptyTitle: string
+    emptyDesc: string
+    running: string
+    failed: string
+    verified: string
+    pending: string
+    cancelled: string
+    halted: string
+    unknownWorkflow: string
+    steps: (count: number) => string
+    state: (state: string) => string
+    durationSeconds: (seconds: string) => string
+    durationMinutes: (minutes: number, seconds: number) => string
+    stepState: (state: string) => string
+    stepPending: string
+    verifier: (verdict: 'pass' | 'fail') => string
+    error: (message: string) => string
+    haltReason: (reason: string) => string
+  }
+
   commandCenter: {
     close: string
     paletteTitle: string

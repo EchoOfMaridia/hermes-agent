@@ -961,6 +961,29 @@ export const ja = defineLocale({
     tokens: value => `${value} トーク`
   },
 
+  workflows: {
+    title: 'ワークフロー',
+    subtitle: count => `起動以降 ${count} 件のラン`,
+    emptyTitle: 'まだワークフローがありません',
+    emptyDesc: '/workflow create または call_workflow ツールが起動すると、ここにリアルタイムで表示されます。',
+    running: '実行中',
+    failed: '失敗',
+    verified: '検証済み',
+    pending: '待機中',
+    cancelled: 'キャンセル',
+    halted: '停止',
+    unknownWorkflow: '名前のないワークフロー',
+    steps: count => `${count} ステップ`,
+    state: state => `状態: ${state}`,
+    durationSeconds: seconds => `${seconds}秒`,
+    durationMinutes: (minutes, seconds) => `${minutes}分 ${seconds}秒`,
+    stepState: state => state,
+    stepPending: '開始を待機中…',
+    verifier: verdict => (verdict === 'pass' ? '検証パス' : '検証却下'),
+    error: message => `エラー: ${message}`,
+    haltReason: reason => `停止: ${reason}`
+  },
+
   commandCenter: {
     close: 'コマンドセンターを閉じる',
     paletteTitle: 'コマンドパレット',
