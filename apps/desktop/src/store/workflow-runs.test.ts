@@ -9,11 +9,16 @@ import {
   $workflowRuns,
   $hasRunningWorkflow,
   $activeWorkflowRun,
+  $subagentsByRun,
+  ORPHAN_RUN_KEY,
   setActiveWorkflowRun,
   pushWorkflowRunStarted,
   finishWorkflowRun,
   pushWorkflowStepStarted,
   pushWorkflowStepFinished,
+  linkSubagentToRun,
+  unlinkSubagentFromRun,
+  subagentsForRun,
 } from './workflow-runs'
 
 const ts = (n: number) => 1_700_000_000 + n
@@ -250,5 +255,61 @@ describe('workflow-runs store', () => {
 
     setActiveWorkflowRun(null)
     expect($activeWorkflowRun.get()).toBe(null)
+  })
+})
+
+// ============================================================================
+// $subagentsByRun — subagent-to-workflow-run attribution
+// ============================================================================
+
+describe('workflow-runs $subagentsByRun', () => {
+  beforeEach(() => {
+    $workflowRuns.set({})
+    $subagentsByRun.set({})
+    setActiveWorkflowRun(null)
+  })
+
+  it('orphan subagent (no run) goes to _orphan bucket', () => {
+    linkSubagentToRun(null, 'delegate-tool:abc:0')
+    expect($subagentsByRun.get()[ORPHAN_RUN_KEY]).toEqual(['delegate-tool:abc:0'])
+  })
+
+  it('linking a subagent to a run moves it out of orphan', () => {
+    linkSubagentToRun(null, 'delegate-tool:abc:0')
+    linkSubagentToRun('r_a', 'delegate-tool:abc:0')
+
+    const byRun = $subagentsByRun.get()
+    expect(byRun['r_a']).toEqual(['delegate-tool:abc:0'])
+    expect(byRun[ORPHAN_RUN_KEY]).toBeUndefined()
+  })
+
+  it('single run, multiple subagents — append-only', () => {
+    linkSubagentToRun('r_a', 'delegate-tool:abc:0')
+    linkSubagentToRun('r_a', 'delegate-tool:abc:1')
+    linkSubagentToRun('r_a', 'delegate-tool:def:0')
+
+    expect(subagentsForRun($subagentsByRun.get(), 'r_a')).toEqual([
+      'delegate-tool:abc:0',
+      'delegate-tool:abc:1',
+      'delegate-tool:def:0',
+    ])
+  })
+
+  it('unlink removes from bucket; empty bucket is cleaned up', () => {
+    linkSubagentToRun('r_a', 'delegate-tool:abc:0')
+    unlinkSubagentFromRun('r_a', 'delegate-tool:abc:0')
+
+    const byRun = $subagentsByRun.get()
+    expect(byRun['r_a']).toBeUndefined()
+  })
+
+  it('multi-run coexistence', () => {
+    linkSubagentToRun('r_a', 'sub-a1')
+    linkSubagentToRun('r_b', 'sub-b1')
+    linkSubagentToRun('r_b', 'sub-b2')
+
+    const byRun = $subagentsByRun.get()
+    expect(byRun['r_a']).toEqual(['sub-a1'])
+    expect(byRun['r_b']).toEqual(['sub-b1', 'sub-b2'])
   })
 })

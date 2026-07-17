@@ -220,3 +220,69 @@ export function pushWorkflowStepFinished(
   if (!found) return
   $workflowRuns.set({ ...$workflowRuns.get(), [runId]: { ...current, steps } })
 }
+
+// ============================================================================
+// Subagent → workflow run attribution
+// ----------------------------------------------------------------------------
+// When a subagent spawns during a workflow step (e.g. delegate_task inside a
+// step body), the wiring layer calls linkSubagentToRun() to attribute it to
+// the active workflow run. The reducer maintains $subagentsByRun; orphan
+// subagents (no known run) go to the `_orphan` bucket and are not surfaced
+// in the panel.
+//
+// The wiring layer is responsible for matching subagent events to a run.
+// Today the match is by `(runId, stepName, callIndex)` — the same triple
+// the workflow plugin's EventTranslator uses for active_agents[].
+// ============================================================================
+
+export const ORPHAN_RUN_KEY = '_orphan'
+
+export const $subagentsByRun = atom<Record<string, string[]>>({})
+
+export function linkSubagentToRun(
+  runId: string | null,
+  subagentId: string,
+): void {
+  if (!subagentId) return
+  const targetKey = runId ?? ORPHAN_RUN_KEY
+  const current = $subagentsByRun.get()
+  const existing = current[targetKey] ?? []
+  if (existing.includes(subagentId)) return
+  // Defensive: remove the orphan entry for this subagent if it was placed
+  // there previously and is now being linked to a real run.
+  const next: Record<string, string[]> = { ...current }
+  if (runId) {
+    const orphan = (next[ORPHAN_RUN_KEY] ?? []).filter(id => id !== subagentId)
+    if (orphan.length) {
+      next[ORPHAN_RUN_KEY] = orphan
+    } else {
+      delete next[ORPHAN_RUN_KEY]
+    }
+  }
+  next[targetKey] = [...existing, subagentId]
+  $subagentsByRun.set(next)
+}
+
+export function unlinkSubagentFromRun(
+  runId: string | null,
+  subagentId: string,
+): void {
+  if (!subagentId) return
+  const targetKey = runId ?? ORPHAN_RUN_KEY
+  const current = $subagentsByRun.get()
+  const existing = current[targetKey] ?? []
+  const filtered = existing.filter(id => id !== subagentId)
+  const next: Record<string, string[]> = { ...current }
+  if (filtered.length) {
+    next[targetKey] = filtered
+  } else {
+    delete next[targetKey]
+  }
+  $subagentsByRun.set(next)
+}
+
+/** Convenience computed — which subagents belong to this run? */
+export const subagentsForRun = (
+  byRun: Record<string, string[]>,
+  runId: string,
+): string[] => byRun[runId] ?? []
