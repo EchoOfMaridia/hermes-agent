@@ -150,12 +150,54 @@ Agent calls (LLM-driven sub-tasks inside a step):
     - `.duration`:   wallclock seconds
 
 When to use each agent-call surface:
-- Pure text reasoning / extraction (no world interaction):
+- Structured-output extraction (PREFERRED for any step that needs JSON):
+    When a step needs structured JSON from an LLM call, declare
+    ``output_schema=`` on the ``@step`` decorator and pass
+    ``json_schema=...`` to ``ask_agent``. Don't parse ``response.text``
+    manually with ``json.loads`` — the runtime enforces the schema
+    automatically and ``ctx.runtime.parse_structured`` handles prose-wrapped,
+    fenced, and partially-broken JSON responses.
+
+    ```python
+    schema = {
+        "type": "object",
+        "properties": {
+            "intent": {"type": "string", "enum": ["refund", "support", "sales"]},
+            "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+        },
+        "required": ["intent", "confidence"],
+    }
+
+    @step(name="classify_ticket", output_schema=schema)
+    async def classify_ticket(ctx, ticket_text: str) -> Evidence:
+        response = await ctx.runtime.ask_agent(
+            prompt=f"Classify this support ticket: {ticket_text}",
+            json_schema=schema,
+            schema_name="TicketIntent",
+        )
+        return Evidence(
+            files_changed=(), commands_run=(), exit_codes=(),
+            tests_run=0, tests_passed=0, duration_seconds=0.0,
+            parsed_payload=ctx.runtime.parse_structured(response, schema=schema),
+        )
+    ```
+
+    When ``output_schema=`` is declared:
+      - The runtime auto-installs a jsonschema validator as the step's
+        verifier. Don't write a manual verifier for shape checks —
+        the auto-verifier handles them.
+      - The parsed payload is auto-populated on ``Evidence.parsed_payload``
+        when the step fn calls ``ctx.runtime.parse_structured``.
+      - The bridge handles wire-level response_format enforcement
+        in-process (PluginLlmBridge) or prompt-text append as a fallback
+        (HermesChatBridge subprocess path).
+
+- Pure text reasoning / extraction (no world interaction, no JSON needed):
     response = await ctx.runtime.ask_agent(
-        prompt="List the functions in module X. Return JSON.",
+        prompt="List the functions in module X.",
         model="haiku",
     )
-    data = json.loads(response.text)
+    # response.text is plain prose; no parse step needed.
 
 - Step needs the agent to ACT (run commands, edit files, search):
     response = await ctx.runtime.ask_agent(
