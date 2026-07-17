@@ -6,19 +6,19 @@ import type {
 } from '@/types/hermes'
 
 import {
-  $workflowRuns,
-  $hasRunningWorkflow,
   $activeWorkflowRun,
+  $hasRunningWorkflow,
   $subagentsByRun,
-  ORPHAN_RUN_KEY,
-  setActiveWorkflowRun,
-  pushWorkflowRunStarted,
+  $workflowRuns,
   finishWorkflowRun,
-  pushWorkflowStepStarted,
-  pushWorkflowStepFinished,
   linkSubagentToRun,
-  unlinkSubagentFromRun,
+  ORPHAN_RUN_KEY,
+  pushWorkflowRunStarted,
+  pushWorkflowStepFinished,
+  pushWorkflowStepStarted,
+  setActiveWorkflowRun,
   subagentsForRun,
+  unlinkSubagentFromRun,
 } from './workflow-runs'
 
 const ts = (n: number) => 1_700_000_000 + n
@@ -45,6 +45,7 @@ describe('workflow-runs store', () => {
       started_at: ts(0),
       steps: ['plan', 'execute', 'verify'],
     }
+
     pushWorkflowRunStarted(payload)
 
     const runs = $workflowRuns.get()
