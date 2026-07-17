@@ -5863,6 +5863,12 @@ class AIAgent:
             tasks=_strip_model_hidden_task_fields(function_args.get("tasks")),
             max_iterations=function_args.get("max_iterations"),
             role=function_args.get("role"),
+            # Forward the model's per-task `model` field when present.
+            # delegate_task() enforces the delegation.allow_model_selection
+            # gate internally and silently drops the field for users who
+            # haven't opted in, so this dispatch site does not need to
+            # duplicate the config check.
+            model=function_args.get("model"),
             background=(not _is_subagent),
             parent_agent=self,
         )
