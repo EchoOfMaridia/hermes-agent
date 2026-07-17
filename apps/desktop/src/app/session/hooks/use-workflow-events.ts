@@ -25,12 +25,6 @@
 
 import { useCallback } from 'react'
 
-import type {
-  WorkflowRunFinishedPayload,
-  WorkflowRunStartedPayload,
-  WorkflowStepFinishedPayload,
-} from '@/types/hermes'
-
 import {
   $activeWorkflowRun,
   $workflowRuns,
@@ -40,6 +34,11 @@ import {
   pushWorkflowStepFinished,
   pushWorkflowStepStarted,
 } from '@/store/workflow-runs'
+import type {
+  WorkflowRunFinishedPayload,
+  WorkflowRunStartedPayload,
+  WorkflowStepFinishedPayload,
+} from '@/types/hermes'
 
 export interface WorkflowSubagentInfo {
   subagentId: string
@@ -54,7 +53,7 @@ export interface WorkflowGatewayEvent {
   payload?: Record<string, unknown>
 }
 
-interface WorkflowEventRouter {
+export interface WorkflowEventRouter {
   onRunStarted: (payload: WorkflowRunStartedPayload) => void
   onRunFinished: (payload: WorkflowRunFinishedPayload) => void
   onStepStarted: (runId: string, stepName: string, ts: number) => void
@@ -79,20 +78,25 @@ function findRunForStep(
   const runs = $workflowRuns.get()
   // Try the active run first.
   const active = $activeWorkflowRun.get()
+
   if (active && runs[active]?.state === 'running') {
-    if (runs[active].steps.some(s => s.name === stepName)) return active
+    if (runs[active].steps.some(s => s.name === stepName)) {return active}
   }
+
   // Fallback: the session_id the event arrived on (sometimes = runId).
   if (fallbackRunId && runs[fallbackRunId]?.state === 'running') {
     if (runs[fallbackRunId].steps.some(s => s.name === stepName)) {
       return fallbackRunId
     }
   }
+
   // Last resort: any running run that has this step.
   for (const [runId, run] of Object.entries(runs)) {
-    if (run.state !== 'running') continue
-    if (run.steps.some(s => s.name === stepName)) return runId
+    if (run.state !== 'running') {continue}
+
+    if (run.steps.some(s => s.name === stepName)) {return runId}
   }
+
   return null
 }
 
@@ -100,10 +104,13 @@ function findRunForStep(
 function findActiveRunId(): string | null {
   const active = $activeWorkflowRun.get()
   const runs = $workflowRuns.get()
-  if (active && runs[active]?.state === 'running') return active
+
+  if (active && runs[active]?.state === 'running') {return active}
+
   for (const [runId, run] of Object.entries(runs)) {
-    if (run.state === 'running') return runId
+    if (run.state === 'running') {return runId}
   }
+
   return null
 }
 
@@ -179,30 +186,43 @@ export function dispatchWorkflowEvent(
   switch (type) {
     case 'workflow_run_started': {
       router.onRunStarted(payload as unknown as WorkflowRunStartedPayload)
+
       return
     }
+
     case 'workflow_run_completed':
+
     case 'workflow_run_failed':
+
     case 'workflow_run_halted':
     case 'workflow_run_cancelled': {
       router.onRunFinished(payload as unknown as WorkflowRunFinishedPayload)
+
       return
     }
+
     case 'tool.start': {
       const toolName = String(
         (payload as { tool_name?: string }).tool_name ?? '',
       )
-      if (!toolName) return
+
+      if (!toolName) {return}
       router.onStepStarted(sessionId ?? '', toolName, now())
+
       return
     }
+
     case 'tool.complete': {
       const toolName = String(
         (payload as { tool_name?: string }).tool_name ?? '',
       )
-      if (!toolName) return
+
+      if (!toolName) {return}
       const toolId = String((payload as { tool_id?: string }).tool_id ?? '')
       const ok = Boolean((payload as { ok?: boolean }).ok ?? true)
+      const validRaw = (payload as { valid?: unknown }).valid
+      const reason = (payload as { reason?: string }).reason
+      const attempt = (payload as { attempt?: number }).attempt
       router.onStepFinished(
         sessionId ?? '',
         toolName,
@@ -211,23 +231,31 @@ export function dispatchWorkflowEvent(
           duration: Number((payload as { duration?: number }).duration ?? 0),
           ok,
           index: 0,
+          ...(typeof validRaw === 'boolean' ? { valid: validRaw } : {}),
+          ...(typeof reason === 'string' ? { reason } : {}),
+          ...(typeof attempt === 'number' ? { attempt } : {}),
         },
         now(),
       )
       // Attach the tool's emitted subagent ids (for delegate_task inside a
       // workflow step) to the run.
       void toolId
+
       return
     }
+
     case 'subagent.spawn_requested':
     case 'subagent.start': {
       const subagentId = String(
         (payload as { subagent_id?: string }).subagent_id ?? '',
       )
-      if (!subagentId) return
+
+      if (!subagentId) {return}
       router.onSubagentSpawned({ subagentId, runId: sessionId })
+
       return
     }
+
     default:
       return
   }
