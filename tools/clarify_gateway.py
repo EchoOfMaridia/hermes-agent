@@ -228,12 +228,19 @@ def resolve_choice_by_index(clarify_id: str, index: int) -> bool:
     return resolve_gateway_clarify(clarify_id, resolved_text)
 
 
-def get_pending_for_session(session_key: str) -> Optional[_ClarifyEntry]:
-    """Return the OLDEST pending clarify entry for a session, or None.
+def get_pending_for_session(
+    session_key: str,
+    *,
+    include_choice_prompts: bool = False,
+) -> Optional[_ClarifyEntry]:
+    """Return the oldest pending clarify entry for a session, or None.
 
-    Used by the text-fallback intercept in ``_handle_message`` — when a
-    clarify is awaiting a free-form text response, the next user message
-    in that session is captured as the answer.
+    By default this only returns entries awaiting free-form text (open-ended
+    clarifies, or a multi-choice clarify after the user picked ``Other``).
+    Gateways may pass ``include_choice_prompts=True`` when the user has typed
+    directly in response to an active multi-choice prompt; in that case the
+    oldest unresolved clarify is returned so the text can resolve it instead
+    of being queued as an unrelated follow-up turn.
     """
     with _lock:
         ids = _session_index.get(session_key) or []
@@ -241,9 +248,43 @@ def get_pending_for_session(session_key: str) -> Optional[_ClarifyEntry]:
             entry = _entries.get(cid)
             if entry is None:
                 continue
-            if entry.awaiting_text:
+            if include_choice_prompts or entry.awaiting_text:
                 return entry
         return None
+
+
+def _coerce_text_response(entry: _ClarifyEntry, response: str) -> str:
+    """Map typed choice replies to canonical choice text, otherwise keep custom text."""
+    text = str(response).strip()
+    if entry.choices:
+        try:
+            idx = int(text) - 1
+        except ValueError:
+            idx = -1
+        if 0 <= idx < len(entry.choices):
+            return entry.choices[idx]
+        for choice in entry.choices:
+            if text.casefold() == str(choice).strip().casefold():
+                return str(choice).strip()
+    return text
+
+
+def resolve_text_response_for_session(session_key: str, response: str) -> bool:
+    """Resolve the oldest pending clarify in ``session_key`` from typed text.
+
+    Mirrors the adapter-side button path: looks up the oldest pending entry
+    (including multi-choice prompts that haven't been flipped into text
+    capture mode yet), coerces numeric/exact-text replies to the canonical
+    choice string, and resolves the entry's wait. Returns False when the
+    session has no pending clarify or coercion yields no match.
+    """
+    entry = get_pending_for_session(session_key, include_choice_prompts=True)
+    if entry is None:
+        return False
+    return resolve_gateway_clarify(
+        entry.clarify_id,
+        _coerce_text_response(entry, response),
+    )
 
 
 def mark_awaiting_text(clarify_id: str) -> bool:
