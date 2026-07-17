@@ -68,6 +68,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
+try:
+    import jsonschema as _jsonschema_lib
+except ImportError:  # pragma: no cover — jsonschema is an optional dep
+    _jsonschema_lib = None  # type: ignore[assignment]
+
 from .dsl.types import (
     Evidence,
     RunContext,
@@ -327,9 +332,25 @@ class Run:
 
                 # Verify before accepting the step.
                 self.step_states[spec.name] = StepState.AWAITING_VERIFICATION
-                if spec.verifier is not None:
+
+                # Auto-schema-verifier: when output_schema is declared
+                # AND no explicit verifier= was provided, install a
+                # default verifier that jsonschema-validates the
+                # evidence's parsed_payload against the schema.
+                # Explicit verifier= ALWAYS overrides this hook.
+                effective_verifier = spec.verifier
+                if (
+                    effective_verifier is None
+                    and spec.output_schema is not None
+                ):
+                    effective_verifier = _auto_schema_verifier(
+                        schema=spec.output_schema,
+                        jsonschema_lib=_jsonschema_lib,
+                    )
+
+                if effective_verifier is not None:
                     try:
-                        verdict = await spec.verifier(evidence, ctx)
+                        verdict = await effective_verifier(evidence, ctx)
                     except Exception as e:
                         self.journal.append({
                             "kind": Journal.KIND_VERIFIER_RETURNED,
@@ -755,6 +776,81 @@ def _evidence_to_dict(ev: Evidence) -> dict:
         "tests_passed": ev.tests_passed,
         "duration_seconds": ev.duration_seconds,
     }
+
+
+def _auto_schema_verifier(
+    schema: dict,
+    jsonschema_lib: Any | None,
+) -> Callable[[Evidence, "RunContext"], Awaitable[VerifierResult]]:
+    """Build a default verifier that jsonschema-validates Evidence.parsed_payload.
+
+    Used by Run.execute_step when a @step declares output_schema= AND
+    no explicit verifier= was provided. The returned coroutine is
+    installed in place of spec.verifier for the duration of that step's
+    execution. Explicit verifier= ALWAYS overrides this — see the
+    auto-verifier wiring in Run.execute_step.
+
+    Args:
+        schema:          The JSON Schema the step declared.
+        jsonschema_lib:  The optional ``jsonschema`` module (already
+                         resolved at module import time). ``None`` when
+                         the package isn't installed — the returned
+                         verifier best-effort passes with a debug note.
+
+    Returns:
+        An async coroutine matching the Verifier protocol: takes
+        (Evidence, RunContext) and returns VerifierResult.
+    """
+    async def _verify(
+        ev: Evidence,
+        ctx: "RunContext",
+        _schema: dict = schema,
+        _jsonschema: Any = jsonschema_lib,
+    ) -> VerifierResult:
+        if ev.parsed_payload is None:
+            return VerifierResult(
+                valid=False,
+                reason=(
+                    "step declared output_schema but returned no "
+                    "parsed_payload; call "
+                    "ctx.runtime.parse_structured(response, "
+                    "schema=...) inside the step body and pass the "
+                    "result to Evidence(parsed_payload=...)"
+                ),
+            )
+        if _jsonschema is None:
+            return VerifierResult(
+                valid=True,
+                reason=(
+                    "schema validation skipped: jsonschema package "
+                    "not installed"
+                ),
+            )
+        try:
+            _jsonschema.validate(ev.parsed_payload, _schema)
+            top_keys = (
+                len(ev.parsed_payload)
+                if isinstance(ev.parsed_payload, dict)
+                else "non-dict"
+            )
+            return VerifierResult(
+                valid=True,
+                reason=(
+                    f"parsed_payload matches output_schema "
+                    f"({top_keys} top-level keys)"
+                ),
+            )
+        except _jsonschema.ValidationError as exc:
+            path = list(exc.absolute_path)
+            return VerifierResult(
+                valid=False,
+                reason=(
+                    f"parsed_payload does not match output_schema: "
+                    f"{exc.message} at path {path}"
+                ),
+            )
+
+    return _verify
 
 
 # Late import to avoid circular issues at module import time.
