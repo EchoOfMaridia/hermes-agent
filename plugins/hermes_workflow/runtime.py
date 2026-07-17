@@ -620,7 +620,9 @@ class WorkflowRuntime:
                         max_tokens: int | None = None,
                         tools: list[dict] | None = None,
                         session_key: str | None = None,
-                        system_prompt: str | None = None) -> AgentResponse:
+                        system_prompt: str | None = None,
+                        json_schema: dict | None = None,
+                        schema_name: str | None = None) -> AgentResponse:
         """Invoke the agent bridge. The bridge journals the call.
 
         This is the only way a workflow script invokes the LLM agent.
@@ -650,15 +652,77 @@ class WorkflowRuntime:
                            the inner bridge supports threading.
                            ``None`` = one-shot call.
             system_prompt: Optional system prompt override for this call.
+            json_schema:   Optional JSON Schema describing the structured
+                           output the caller wants. Forwarded to the
+                           underlying AgentBridge.invoke(); bridges that
+                           support wire-level response_format use it for
+                           enforcement; bridges that don't paste the
+                           schema into the prompt. The returned
+                           AgentResponse.parsed is the deserialized
+                           object when parsing succeeded, None otherwise.
+            schema_name:   Optional human-readable name for the schema.
+                           Used by the wire-format layer to label the
+                           constraint.
 
         Returns:
-            AgentResponse with the final text and structured tool_calls.
+            AgentResponse with the final text, parsed object (when
+            json_schema is set and parsing succeeded), and content_type.
         """
         return await self._agent_bridge.invoke(
             prompt=prompt, model=model, max_tokens=max_tokens,
             tools=tools, session_key=session_key,
             system_prompt=system_prompt,
+            json_schema=json_schema, schema_name=schema_name,
         )
+
+    def parse_structured(
+        self,
+        response: AgentResponse,
+        *,
+        schema: dict | None = None,
+    ) -> Any | None:
+        """Parse a structured-output response from an LLM call.
+
+        Thin pass-through to
+        :func:`plugins.hermes_workflow.structured_output.parse_structured`.
+        Exposed on the runtime so workflow scripts can write::
+
+            response = await ctx.runtime.ask_agent(
+                prompt="...", json_schema=schema_def,
+            )
+            data = ctx.runtime.parse_structured(response, schema=schema_def)
+
+        When the inner bridge already populated ``response.parsed`` (the
+        PluginLlmBridge does this in-process), this method returns that
+        value immediately. Re-validation against a different schema still
+        runs through parse_structured's jsonschema path.
+
+        Args:
+            response: An AgentResponse from a prior ask_agent call.
+            schema:   Optional JSON Schema to validate against. When None,
+                      validation is skipped (parses JSON-only).
+
+        Returns:
+            The parsed object (dict or list), or None when no JSON could
+            be recovered from response.text.
+
+        Raises:
+            StructuredOutputError: when schema validation fails.
+        """
+        # Fast path: bridge already parsed it.
+        if response.parsed is not None:
+            if schema is not None:
+                # Re-validate against caller-supplied schema (might differ
+                # from the one passed to the bridge).
+                import json as _json
+                from .structured_output import parse_structured as _parse
+                return _parse(
+                    _json.dumps(response.parsed), schema=schema
+                )
+            return response.parsed
+        # Slow path: parse response.text.
+        from .structured_output import parse_structured as _parse
+        return _parse(response.text, schema=schema)
 
     # -- visibility dispatcher --------------------------------------------
 
