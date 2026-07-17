@@ -54,7 +54,12 @@ import type {
   StatusResponse,
   ToolsetConfig,
   ToolsetInfo,
-  ToolsetModelsResponse
+  ToolsetModelsResponse,
+  WorkflowRunFinishedPayload,
+  WorkflowRunStartedPayload,
+  WorkflowStepFinishedPayload,
+  WorkflowStepStartedPayload,
+  WorkflowSubagentLinkPayload
 } from '@/types/hermes'
 
 // Desktop startup fires a burst of read-only data calls (config, profiles,
@@ -191,7 +196,12 @@ export type {
   ToolsetConfig,
   ToolsetInfo,
   ToolsetModel,
-  ToolsetModelsResponse
+  ToolsetModelsResponse,
+  WorkflowRunFinishedPayload,
+  WorkflowRunStartedPayload,
+  WorkflowStepFinishedPayload,
+  WorkflowStepStartedPayload,
+  WorkflowSubagentLinkPayload
 } from '@/types/hermes'
 
 export class HermesGateway extends JsonRpcGatewayClient {

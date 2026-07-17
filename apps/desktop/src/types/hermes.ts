@@ -1076,3 +1076,89 @@ export interface ModelAssignmentResponse {
   stale_aux?: StaleAuxAssignment[]
   tasks?: string[]
 }
+
+// ============================================================================
+// Workflow run events — emitted by the hermes_workflow plugin's EventTranslator
+// (plugins/hermes_workflow/visibility.py) as GatewayNotice / ToolCallChunk /
+// ToolCallFinished StreamEvents. The desktop subscribes to them via the
+// gateway event stream and routes them into the $workflowRuns store.
+//
+// The shape mirrors the `extra` payload the plugin's translator passes to
+// StreamEvent constructors, with snake_case keys preserved so a JSON.parse
+// round-trip is lossless.
+// ============================================================================
+
+/** `GatewayNotice(kind="workflow_run_started", extra={...})` */
+export interface WorkflowRunStartedPayload {
+  kind: 'workflow_run_started'
+  run_id: string
+  workflow: string
+  max_concurrent?: number
+  max_total?: number
+  started_at?: number
+  steps?: string[]
+}
+
+/** Discriminated union of the four terminal-run event kinds. */
+export type WorkflowRunFinishedPayload =
+  | {
+      kind: 'workflow_run_completed'
+      run_id: string
+      ended_at?: number
+    }
+  | {
+      kind: 'workflow_run_failed'
+      run_id: string
+      error?: string
+      error_type?: string
+      ended_at?: number
+    }
+  | {
+      kind: 'workflow_run_halted'
+      run_id: string
+      reason?: string
+      ended_at?: number
+    }
+  | {
+      kind: 'workflow_run_cancelled'
+      run_id: string
+      reason?: string
+      ended_at?: number
+    }
+
+/** `ToolCallChunk(tool_name=<step>, ...)` — emitted at step_started. */
+export interface WorkflowStepStartedPayload {
+  step: string
+  index: number
+  /** Wallclock ts in seconds (matches visibility.py:snapshot_for_run). */
+  started_at?: number
+}
+
+/** `ToolCallFinished(tool_name=<step>, ok, duration, index)` — emitted at step
+ *  completion OR verifier-returned (a verifier-failed step flips `ok=false`). */
+export interface WorkflowStepFinishedPayload {
+  step: string
+  duration?: number
+  ok: boolean
+  index: number
+  /** Valid/invalid verdict from the step's verifier. Optional because the
+   *  streaming event may not always include it. */
+  valid?: boolean
+  reason?: string
+  attempt?: number
+}
+
+/** `subagent.*` events from delegate_task tool calls inside a workflow step.
+ *  Used by $subagentsByRun to attribute subagents to their parent workflow
+ *  run. Mirrors the shape emitted by use-message-stream's delegateTaskPayloads. */
+export interface WorkflowSubagentLinkPayload {
+  subagent_id: string
+  parent_id: null | string
+  goal: string
+  task_index: number
+  task_count: number
+  /** Set when the subagent is attributable to a specific workflow run via
+   *  the parent step's call_index. */
+  workflow_run_id?: string
+  workflow_step?: string
+}
