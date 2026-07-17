@@ -32,6 +32,7 @@ from plugins.hermes_workflow.dsl import (
     MaxConcurrentReached,
     MaxTotalReached,
     VerifierMismatch,
+    StructuredOutputError,
     # Primitives
     step,
     parallel,
@@ -53,6 +54,7 @@ __all__ = [
     "MaxConcurrentReached",
     "MaxTotalReached",
     "VerifierMismatch",
+    "StructuredOutputError",
     "step",
     "parallel",
     "gather",

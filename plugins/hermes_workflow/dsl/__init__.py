@@ -22,6 +22,7 @@ from .types import (
     MaxConcurrentReached,
     MaxTotalReached,
     VerifierMismatch,
+    StructuredOutputError,
 )
 from .primitives import step, parallel, gather, workflow
 
@@ -39,6 +40,7 @@ __all__ = [
     "MaxConcurrentReached",
     "MaxTotalReached",
     "VerifierMismatch",
+    "StructuredOutputError",
     "step",
     "parallel",
     "gather",

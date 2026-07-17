@@ -73,6 +73,7 @@ def step(
     max_retries: int = 0,
     retry_backoff_seconds: float = 1.0,
     timeout_seconds: float | None = None,
+    output_schema: dict | None = None,
 ) -> Callable[[Callable[..., Awaitable[Evidence]]], Callable[..., Awaitable[Evidence]]]:
     """Decorator. Wraps a coroutine as a workflow step with a declared contract.
 
@@ -96,6 +97,17 @@ def step(
         retry_backoff_seconds: Sleep between retry attempts. Default 1.0.
                               Doubles each retry (exponential backoff).
         timeout_seconds:      Hard wall-clock timeout. None = no timeout.
+        output_schema:        Optional JSON Schema describing the structured
+                              output contract for this step. When set, the
+                              runtime (a) forwards the schema to every
+                              AgentBridge.invoke() call made inside the
+                              step, (b) parses the LLM response back into
+                              a Python object via
+                              ``ctx.runtime.parse_structured``, and (c)
+                              installs an auto-verifier that runs
+                              ``jsonschema.validate`` against the parsed
+                              payload. None (default) = unstructured text
+                              response (v0.1.0 behaviour).
 
     Returns:
         Decorator that wraps the coroutine. The wrapper carries a
@@ -127,6 +139,11 @@ def step(
             f"step({name!r}): timeout_seconds must be > 0 or None, got "
             f"{timeout_seconds}"
         )
+    if output_schema is not None and not isinstance(output_schema, dict):
+        raise TypeError(
+            f"step({name!r}): output_schema must be a dict or None, got "
+            f"{type(output_schema).__name__}"
+        )
 
     def decorator(
         fn: Callable[..., Awaitable[Evidence]],
@@ -140,6 +157,7 @@ def step(
             max_retries=max_retries,
             retry_backoff_seconds=retry_backoff_seconds,
             timeout_seconds=timeout_seconds,
+            output_schema=output_schema,
         )
 
         async def wrapper(*args: Any, **kwargs: Any) -> Evidence:

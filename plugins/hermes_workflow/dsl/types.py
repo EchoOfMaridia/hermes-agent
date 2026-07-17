@@ -92,6 +92,12 @@ class Evidence:
         tests_run:        Total tests discovered (0 if not a test step).
         tests_passed:     Tests that passed (must be <= tests_run).
         duration_seconds: Wall-clock seconds the step took.
+        parsed_payload:   Optional structured object parsed from the step's
+                           last ask_agent response. When the step declares
+                           output_schema= on @step, the auto-installed schema
+                           verifier reads this field. None for steps that
+                           don't call ask_agent, whose response was
+                           unstructured, or when no parser was wired.
     """
 
     files_changed: tuple[str, ...]
@@ -100,6 +106,7 @@ class Evidence:
     tests_run: int
     tests_passed: int
     duration_seconds: float
+    parsed_payload: Any | None = None
 
     def __post_init__(self) -> None:
         # Invariant: tests_passed <= tests_run.
@@ -157,6 +164,19 @@ class StepSpec:
     The runtime inspects every StepSpec at workflow load time to build the
     dependency graph and run GraphValidator. See plugins/hermes_workflow/dsl/
     validator.py for the validator.
+
+    Attributes:
+        output_schema: Optional JSON Schema describing the structured-output
+                       contract for this step. When set, the runtime (a)
+                       forwards the schema to AgentBridge.invoke(json_schema=...)
+                       on every ask_agent call made inside the step, (b)
+                       parses the LLM response back into a Python object
+                       via ctx.runtime.parse_structured, and (c) installs
+                       an auto-verifier that runs jsonschema.validate
+                       against the parsed payload before marking the step
+                       VERIFIED. Explicit verifier= overrides the auto
+                       verifier. None = unstructured text response
+                       (v0.1.0 behaviour).
     """
 
     name: str
@@ -167,6 +187,7 @@ class StepSpec:
     max_retries: int
     retry_backoff_seconds: float
     timeout_seconds: float | None
+    output_schema: dict | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -235,3 +256,39 @@ class VerifierMismatch(WorkflowError):
         super().__init__(
             f"verifier rejected step '{step_name}': {verdict.reason}"
         )
+
+
+class StructuredOutputError(WorkflowError):
+    """Raised when structured-output parsing or validation fails.
+
+    Surfaced from :func:`plugins.hermes_workflow.structured_output.parse_structured`
+    and from the auto-installed schema verifier on steps that declare
+    ``output_schema=``. Carries enough context to debug the failure
+    without re-running the LLM call.
+
+    Attributes:
+        message:           Human-readable explanation of the failure.
+        parsed:            The parsed value at the point of failure (may be
+                           None when no parse was possible before validation,
+                           or when the failure was a total parse miss).
+        schema:            The JSON Schema the parsed output was supposed to
+                           match. None when no schema was provided.
+        validation_path:   List of property names indicating the JSON path
+                           where validation failed (e.g. ``["items", 2,
+                           "score"]`` means ``items[2].score`` was the
+                           offending field). Empty list when no schema was
+                           involved or the validator did not surface a path.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        parsed: Any | None = None,
+        schema: dict | None = None,
+        validation_path: list | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.parsed = parsed
+        self.schema = schema
+        self.validation_path = list(validation_path) if validation_path else []
