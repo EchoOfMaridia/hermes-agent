@@ -39,6 +39,7 @@ import {
   $updateStatus,
   openUpdateOverlayFor
 } from '@/store/updates'
+import { $workflowRuns } from '@/store/workflow-runs'
 import type { StatusResponse } from '@/types/hermes'
 
 import { CRON_ROUTE } from '../../routes'
@@ -63,10 +64,12 @@ interface StatusbarItemsOptions {
   inferenceStatus: RuntimeReadinessResult | null
   openAgents: () => void
   openCommandCenterSection: (section: CommandCenterSection) => void
+  openWorkflows: () => void
   freshDraftReady: boolean
   requestGateway: <T = unknown>(method: string, params?: Record<string, unknown>) => Promise<T>
   statusSnapshot: StatusResponse | null
   toggleCommandCenter: () => void
+  workflowsOpen: boolean
 }
 
 export function useStatusbarItems({
@@ -79,9 +82,12 @@ export function useStatusbarItems({
   inferenceStatus,
   openAgents,
   openCommandCenterSection,
+  openWorkflows,
+  freshDraftReady,
   requestGateway,
   statusSnapshot,
-  toggleCommandCenter
+  toggleCommandCenter,
+  workflowsOpen
 }: StatusbarItemsOptions) {
   const { t } = useI18n()
   const copy = t.shell.statusbar
@@ -163,6 +169,20 @@ export function useStatusbarItems({
       subagentsRunning: lists.reduce((sum, items) => sum + activeSubagentCount(items), 0)
     }
   }, [subagentsBySession])
+
+  const workflowRuns = useStore($workflowRuns)
+
+  const { hasAnyRunningWorkflow, workflowRunsRunning, workflowRunsFailed } = useMemo(() => {
+    const all = Object.values(workflowRuns)
+
+    return {
+      hasAnyRunningWorkflow: all.some(r => r.state === 'running'),
+      workflowRunsRunning: all.filter(r => r.state === 'running').length,
+      workflowRunsFailed: all.filter(
+        r => r.state === 'failed' || r.state === 'halted' || r.state === 'cancelled'
+      ).length
+    }
+  }, [workflowRuns])
 
   const gatewayOpen = gatewayState === 'open'
   const gatewayConnecting = gatewayState === 'connecting'
@@ -365,6 +385,30 @@ export function useStatusbarItems({
         variant: 'action'
       },
       {
+        className: cn(
+          workflowsOpen && 'bg-accent/55 text-foreground',
+          workflowRunsFailed > 0 && 'text-destructive hover:text-destructive'
+        ),
+        detail:
+          hasAnyRunningWorkflow
+            ? copy.workflowsRunning(workflowRunsRunning)
+            : workflowRunsFailed > 0
+              ? copy.failed(workflowRunsFailed)
+              : undefined,
+        icon: workflowRunsFailed > 0 ? (
+          <AlertCircle className="size-3" />
+        ) : hasAnyRunningWorkflow ? (
+          <Loader2 className="size-3 animate-spin" />
+        ) : (
+          <Codicon name="workflow" size="0.75rem" />
+        ),
+        id: 'workflows',
+        label: copy.workflows,
+        onSelect: openWorkflows,
+        title: workflowsOpen ? copy.closeWorkflows : copy.openWorkflows,
+        variant: 'action'
+      },
+      {
         icon: <Clock className="size-3" />,
         id: 'cron',
         label: copy.cron,
@@ -390,7 +434,10 @@ export function useStatusbarItems({
       openAgents,
       subagentsFailed,
       subagentsRunning,
-      toggleCommandCenter
+      toggleCommandCenter,
+      workflowRunsFailed,
+      workflowRunsRunning,
+      hasAnyRunningWorkflow
     ]
   )
 

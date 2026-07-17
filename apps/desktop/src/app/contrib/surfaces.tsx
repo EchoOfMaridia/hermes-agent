@@ -65,12 +65,16 @@ export const StatusbarSurface = memo(function StatusbarSurface({
   actions,
   agentsOpen,
   chatOpen,
-  commandCenterOpen
+  commandCenterOpen,
+  openWorkflows: openWorkflowsAction,
+  workflowsOpen
 }: {
   actions: WiringActions
   agentsOpen: boolean
   chatOpen: boolean
   commandCenterOpen: boolean
+  openWorkflows: () => void
+  workflowsOpen: boolean
 }) {
   const gatewayState = useStore($gatewayState)
   const freshDraftReady = useStore($freshDraftReady)
@@ -89,9 +93,11 @@ export const StatusbarSurface = memo(function StatusbarSurface({
     inferenceStatus,
     openAgents: actions.openAgents,
     openCommandCenterSection: actions.openCommandCenterSection,
+    openWorkflows: openWorkflowsAction,
     requestGateway: actions.requestGateway,
     statusSnapshot,
-    toggleCommandCenter: actions.toggleCommandCenter
+    toggleCommandCenter: actions.toggleCommandCenter,
+    workflowsOpen
   })
 
   return <StatusbarControls items={statusbarItems} leftItems={leftStatusbarItems} />

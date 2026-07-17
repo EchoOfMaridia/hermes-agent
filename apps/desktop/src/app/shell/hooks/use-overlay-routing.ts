@@ -8,7 +8,8 @@ import {
   COMMAND_CENTER_ROUTE,
   isOverlayView,
   NEW_CHAT_ROUTE,
-  STARMAP_ROUTE
+  STARMAP_ROUTE,
+  WORKFLOWS_ROUTE
 } from '@/app/routes'
 
 const SECTIONS = ['sessions', 'system', 'usage'] as const
@@ -21,6 +22,7 @@ export function useOverlayRouting() {
   const settingsOpen = currentView === 'settings'
   const commandCenterOpen = currentView === 'command-center'
   const agentsOpen = currentView === 'agents'
+  const workflowsOpen = currentView === 'workflows'
   const starmapOpen = currentView === 'starmap'
   const cronOpen = currentView === 'cron'
   const profilesOpen = currentView === 'profiles'
@@ -62,6 +64,7 @@ export function useOverlayRouting() {
 
   const openAgents = useCallback(() => navigate(AGENTS_ROUTE), [navigate])
   const openStarmap = useCallback(() => navigate(STARMAP_ROUTE), [navigate])
+  const openWorkflows = useCallback(() => navigate(WORKFLOWS_ROUTE), [navigate])
 
   return {
     agentsOpen,
@@ -74,9 +77,11 @@ export function useOverlayRouting() {
     openAgents,
     openCommandCenterSection,
     openStarmap,
+    openWorkflows,
     profilesOpen,
     settingsOpen,
     starmapOpen,
-    toggleCommandCenter
+    toggleCommandCenter,
+    workflowsOpen
   }
 }

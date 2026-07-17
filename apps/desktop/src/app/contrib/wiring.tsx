@@ -82,10 +82,10 @@ import { useModelControls } from '../session/hooks/use-model-controls'
 import { usePreviewRouting } from '../session/hooks/use-preview-routing'
 import { usePromptActions } from '../session/hooks/use-prompt-actions'
 import { useRouteResume } from '../session/hooks/use-route-resume'
-import { dispatchWorkflowEvent, useWorkflowEvents } from '../session/hooks/use-workflow-events'
 import { useSessionActions } from '../session/hooks/use-session-actions'
 import { useSessionListActions } from '../session/hooks/use-session-list-actions'
 import { useSessionStateCache } from '../session/hooks/use-session-state-cache'
+import { dispatchWorkflowEvent, useWorkflowEvents } from '../session/hooks/use-workflow-events'
 import { useOverlayRouting } from '../shell/hooks/use-overlay-routing'
 import { useWindowControlsOverlayWidth } from '../shell/hooks/use-window-controls-overlay-width'
 import { KeybindPanel } from '../shell/keybind-panel'
@@ -163,10 +163,12 @@ export function ContribWiring({ children }: { children: ReactNode }) {
     openAgents,
     openCommandCenterSection,
     openStarmap,
+    openWorkflows,
     profilesOpen,
     settingsOpen,
     starmapOpen,
-    toggleCommandCenter
+    toggleCommandCenter,
+    workflowsOpen
   } = useOverlayRouting()
 
   const {
@@ -593,6 +595,7 @@ export function ContribWiring({ children }: { children: ReactNode }) {
   // Workflow events flow through dispatchWorkflowEvent which writes into the
   // $workflowRuns store; the Workflows panel UI subscribes to that atom.
   const workflowRouter = useWorkflowEvents()
+
   const handleGatewayEventWithPlugins = useCallback(
     (event: Parameters<typeof handleDesktopGatewayEvent>[0]) => {
       emitGatewayEvent(event)
@@ -779,9 +782,11 @@ export function ContribWiring({ children }: { children: ReactNode }) {
         agentsOpen={agentsOpen}
         chatOpen={chatOpen}
         commandCenterOpen={commandCenterOpen}
+        openWorkflows={openWorkflows}
+        workflowsOpen={workflowsOpen}
       />
     ),
-    [actions, agentsOpen, chatOpen, commandCenterOpen]
+    [actions, agentsOpen, chatOpen, commandCenterOpen, openWorkflows, workflowsOpen]
   )
 
   // The voice cap changes only on config load; the gateway instance + all

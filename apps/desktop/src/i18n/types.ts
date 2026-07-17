@@ -1797,6 +1797,10 @@ export interface Translations {
       openCron: string
       starmap: string
       openStarmap: string
+      workflows: string
+      closeWorkflows: string
+      openWorkflows: string
+      workflowsRunning: (count: number) => string
       turnRunning: string
       currentTurnElapsed: string
       contextUsage: string
