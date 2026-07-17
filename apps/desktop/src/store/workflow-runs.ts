@@ -111,7 +111,7 @@ function freshStep(name: string): WorkflowStep {
 }
 
 export function pushWorkflowRunStarted(payload: WorkflowRunStartedPayload): void {
-  if (!payload?.run_id) return
+  if (!payload?.run_id) {return}
   const stepNames = payload.steps ?? []
   $workflowRuns.set({
     ...$workflowRuns.get(),
@@ -133,13 +133,17 @@ export function pushWorkflowRunStarted(payload: WorkflowRunStartedPayload): void
 
 export function finishWorkflowRun(payload: WorkflowRunFinishedPayload): void {
   const current = $workflowRuns.get()[payload.run_id]
-  if (!current) return
+
+  if (!current) {return}
+
   const base: Pick<WorkflowRun, 'errorMessage' | 'errorType' | 'haltReason'> = {
     errorMessage: current.errorMessage,
     errorType: current.errorType,
     haltReason: current.haltReason,
   }
+
   let next: WorkflowRun
+
   if (payload.kind === 'workflow_run_completed') {
     next = { ...current, ...base, state: 'done', endedAt: payload.ended_at ?? null }
   } else if (payload.kind === 'workflow_run_failed') {
@@ -165,6 +169,7 @@ export function finishWorkflowRun(payload: WorkflowRunFinishedPayload): void {
       haltReason: payload.reason ?? null,
     }
   }
+
   $workflowRuns.set({ ...$workflowRuns.get(), [payload.run_id]: next })
 }
 
@@ -174,14 +179,18 @@ export function pushWorkflowStepStarted(
   ts: number,
 ): void {
   const current = $workflowRuns.get()[runId]
-  if (!current) return
+
+  if (!current) {return}
   let found = false
+
   const steps: WorkflowStep[] = current.steps.map(step => {
-    if (step.name !== stepName) return step
+    if (step.name !== stepName) {return step}
     found = true
+
     return { ...step, state: 'running' as StepState, startedAt: ts }
   })
-  if (!found) return
+
+  if (!found) {return}
   $workflowRuns.set({ ...$workflowRuns.get(), [runId]: { ...current, steps } })
 }
 
@@ -192,15 +201,19 @@ export function pushWorkflowStepFinished(
   ts: number,
 ): void {
   const current = $workflowRuns.get()[runId]
-  if (!current) return
+
+  if (!current) {return}
   let found = false
+
   const steps: WorkflowStep[] = current.steps.map(step => {
-    if (step.name !== stepName) return step
+    if (step.name !== stepName) {return step}
     found = true
     const isVerifierEvent = typeof payload.valid === 'boolean'
+
     const stepPassed = isVerifierEvent
       ? Boolean(payload.valid)
       : Boolean(payload.ok)
+
     return {
       ...step,
       state: (stepPassed ? 'verified' : 'failed') as StepState,
@@ -217,7 +230,8 @@ export function pushWorkflowStepFinished(
         : step.verifierReason,
     }
   })
-  if (!found) return
+
+  if (!found) {return}
   $workflowRuns.set({ ...$workflowRuns.get(), [runId]: { ...current, steps } })
 }
 
@@ -243,22 +257,26 @@ export function linkSubagentToRun(
   runId: string | null,
   subagentId: string,
 ): void {
-  if (!subagentId) return
+  if (!subagentId) {return}
   const targetKey = runId ?? ORPHAN_RUN_KEY
   const current = $subagentsByRun.get()
   const existing = current[targetKey] ?? []
-  if (existing.includes(subagentId)) return
+
+  if (existing.includes(subagentId)) {return}
   // Defensive: remove the orphan entry for this subagent if it was placed
   // there previously and is now being linked to a real run.
   const next: Record<string, string[]> = { ...current }
+
   if (runId) {
     const orphan = (next[ORPHAN_RUN_KEY] ?? []).filter(id => id !== subagentId)
+
     if (orphan.length) {
       next[ORPHAN_RUN_KEY] = orphan
     } else {
       delete next[ORPHAN_RUN_KEY]
     }
   }
+
   next[targetKey] = [...existing, subagentId]
   $subagentsByRun.set(next)
 }
@@ -267,17 +285,19 @@ export function unlinkSubagentFromRun(
   runId: string | null,
   subagentId: string,
 ): void {
-  if (!subagentId) return
+  if (!subagentId) {return}
   const targetKey = runId ?? ORPHAN_RUN_KEY
   const current = $subagentsByRun.get()
   const existing = current[targetKey] ?? []
   const filtered = existing.filter(id => id !== subagentId)
   const next: Record<string, string[]> = { ...current }
+
   if (filtered.length) {
     next[targetKey] = filtered
   } else {
     delete next[targetKey]
   }
+
   $subagentsByRun.set(next)
 }
 
