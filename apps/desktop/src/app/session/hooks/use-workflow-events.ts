@@ -25,6 +25,12 @@
 
 import { useCallback } from 'react'
 
+import type {
+  WorkflowRunFinishedPayload,
+  WorkflowRunStartedPayload,
+  WorkflowStepFinishedPayload
+} from '@/types/hermes'
+
 import {
   $activeWorkflowRun,
   $workflowRuns,
@@ -34,11 +40,6 @@ import {
   pushWorkflowStepFinished,
   pushWorkflowStepStarted
 } from '../../../store/workflow-runs'
-import type {
-  WorkflowRunFinishedPayload,
-  WorkflowRunStartedPayload,
-  WorkflowStepFinishedPayload
-} from '@/types/hermes'
 
 export interface WorkflowSubagentInfo {
   subagentId: string

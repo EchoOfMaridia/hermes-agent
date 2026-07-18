@@ -394,5 +394,6 @@ export function coalesceToolOnlyAssistants<T>(
   _cache?: unknown
 ): readonly T[] {
   void _cache
+
   return messages
 }
