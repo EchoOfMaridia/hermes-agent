@@ -1,0 +1,32 @@
+diff --git a/dist/useAui.js b/dist/useAui.js
+index 4b2c027f48fecc20cbb09f6366dde7790d706e0d..4c5d91e13884da6515a39a586a279dfbec24fd5e 100644
+--- a/dist/useAui.js
++++ b/dist/useAui.js
+@@ -169,10 +169,24 @@ const useDerivedClientAccessorResource = ({ element, clientRef, name }) => {
+ 	const propsRef = useRef(getResourceProps(element));
+ 	propsRef.current = getResourceProps(element);
+ 	return useMemo(() => {
+-		const clientFunction = () => propsRef.current.get(clientRef.current);
++		const clientFunction = () => {
++			const props = propsRef.current;
++			if (props && typeof props.get === 'function') {
++				return props.get(clientRef.current);
++			}
++			// Patch (Hermes desktop, 2026-07-18): upstream @assistant-ui/store@0.2.x reads
++			// propsRef.current as a Derived.Props with a `.get(parentClient)` accessor.
++			// With tap@0.9.x the resource OPTIONS are passed instead, and those options
++			// (e.g. { runtime, __internal_assistantRuntime } from RuntimeAdapter(runtime))
++			// have no `.get` method, so clientFunction() throws "s is not a function" the
++			// moment something calls aui.threads(). Fall back to returning the props
++			// object itself when no `.get` accessor exists, so surface methods on a
++			// ThreadListClient-shaped result (getState/thread/item/...) stay reachable.
++			return props;
++		};
+ 		Object.defineProperties(clientFunction, {
+-			source: { value: propsRef.current.source },
+-			query: { value: propsRef.current.query },
++			source: { value: propsRef.current ? propsRef.current.source : undefined },
++			query: { value: propsRef.current ? propsRef.current.query : undefined },
+ 			name: {
+ 				value: name,
+ 				configurable: true

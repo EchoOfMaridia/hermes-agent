@@ -27,8 +27,26 @@ const pathListKey = (paths: string[]): string =>
     .join('\n')
 
 // Every session in a project, across its repos/worktrees (order-agnostic).
-const projectSessions = (project: SidebarProjectTree): SessionInfo[] =>
-  project.repos.flatMap(repo => repo.groups.flatMap(group => group.sessions))
+// The gateway can hand back repos whose `groups` field is still undefined (the
+// project tree is loading), so the access chain is defended — a missing group
+// or session list is treated as an empty list rather than throwing an
+// "X is not a function" TypeError that wedges the renderer in an error state.
+const projectSessions = (project: SidebarProjectTree): SessionInfo[] => {
+  const repos = project.repos ?? []
+  const groups: SessionInfo[] = []
+
+  for (const repo of repos) {
+    const repoGroups = repo.groups ?? []
+
+    for (const group of repoGroups) {
+      const groupSessions = group.sessions ?? []
+
+      for (const session of groupSessions) {groups.push(session)}
+    }
+  }
+
+  return groups
+}
 
 export const projectTreeCwd = (project: SidebarProjectTree): null | string =>
   project.path || project.repos.find(repo => repo.path)?.path || null

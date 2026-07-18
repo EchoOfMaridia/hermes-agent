@@ -246,7 +246,7 @@ export function mergeRepoWorktreeGroups(
       path: repo.path,
       isMain: true,
       isHome: true,
-      sessions: dedupeById(mainGroups.flatMap(group => group.sessions))
+      sessions: dedupeById(mainGroups.flatMap(group => group.sessions ?? []))
     })
   } else {
     reconciled.push(...mainGroups)

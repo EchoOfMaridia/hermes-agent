@@ -2,7 +2,7 @@ import type { AppendMessage, ThreadMessage } from '@assistant-ui/react'
 import { useStore } from '@nanostores/react'
 import { type MutableRefObject, useCallback, useEffect, useRef } from 'react'
 
-import { SESSION_COMPRESS_REQUEST_TIMEOUT_MS, getProfiles, transcribeAudio } from '@/hermes'
+import { getProfiles, SESSION_COMPRESS_REQUEST_TIMEOUT_MS, transcribeAudio } from '@/hermes'
 import { translateNow, type Translations, useI18n } from '@/i18n'
 import { stripAnsi } from '@/lib/ansi'
 import { branchGroupForUser, type ChatMessage, chatMessageText, textPart } from '@/lib/chat-messages'
@@ -37,9 +37,9 @@ import {
   updateComposerAttachment
 } from '@/store/composer'
 import { resetSessionBackground } from '@/store/composer-status'
-import { clearPreviewArtifacts } from '@/store/preview-status'
 import { clearNotifications, notify, notifyError } from '@/store/notifications'
 import { requestDesktopOnboarding } from '@/store/onboarding'
+import { clearPreviewArtifacts } from '@/store/preview-status'
 import { $activeGatewayProfile, $newChatProfile, ensureGatewayProfile, normalizeProfileKey } from '@/store/profile'
 import {
   $busy,
@@ -110,6 +110,7 @@ function compressTimeoutHint(rawMessage: string): string {
   // needs enough context to decide between retry-vs-/new.
   const ceiling = seconds ? Math.max(1, Math.round(Number(seconds) / 60)) : 8
   const minuteLabel = ceiling === 1 ? 'minute' : 'minutes'
+
   return [
     `compression timed out after ${ceiling} ${minuteLabel}`,
     'The auxiliary model call has not returned. Try one of:',
@@ -169,6 +170,14 @@ const SESSION_BUSY_RETRY_INTERVAL_MS = 150
 
 function isSessionBusyError(error: unknown): boolean {
   return /session busy/i.test(error instanceof Error ? error.message : String(error))
+}
+
+// "request timed out" from the gateway means the in-memory session is gone on
+// the client side too — recovery must treat it like "session not found":
+// resume the SELECTED stored session and retry, instead of surfacing an error
+// that leaves a null activeSessionId and a silently-minted new session.
+function isGatewayTimeoutError(error: unknown): boolean {
+  return /request timed out/i.test(error instanceof Error ? error.message : String(error))
 }
 
 const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms))
@@ -757,6 +766,36 @@ export function usePromptActions({
       }
 
       if (!sessionId) {
+        // A stored session is SELECTED but its runtime binding is gone (the
+        // live session was orphan-reaped, or a timeout/reconnect cleared
+        // activeSessionId). Continuing the selected conversation must mean
+        // resuming it — minting a brand-new backend session here silently
+        // splits the user's chat in two. Only fall through to session
+        // creation when NO stored session is selected (a genuine new-chat
+        // draft).
+        if (selectedStoredSessionIdRef.current) {
+          try {
+            const resumed = await requestGateway<{ session_id: string }>('session.resume', {
+              session_id: selectedStoredSessionIdRef.current
+            })
+
+            if (resumed?.session_id) {
+              sessionId = resumed.session_id
+              activeSessionIdRef.current = sessionId
+            }
+          } catch {
+            // Resume failed (session gone from state.db, gateway hiccup) —
+            // fall through to creating a fresh session rather than
+            // dead-ending the user's message.
+          }
+
+          if (sessionId) {
+            seedOptimistic(sessionId)
+          }
+        }
+      }
+
+      if (!sessionId) {
         try {
           sessionId = await createBackendSessionForSend(visibleText)
         } catch (err) {
@@ -798,8 +837,15 @@ export function usePromptActions({
         try {
           await withSessionBusyRetry(() => requestGateway('prompt.submit', { session_id: sessionId, text }))
         } catch (firstErr) {
-          if (isSessionNotFoundError(firstErr) && selectedStoredSessionIdRef.current) {
-            // Re-register the session in the gateway and get a fresh live ID.
+          if (
+            (isSessionNotFoundError(firstErr) || isGatewayTimeoutError(firstErr)) &&
+            selectedStoredSessionIdRef.current
+          ) {
+            // Re-register the session in the gateway and get a fresh live
+            // ID. Timeouts recover the same way as "session not found": a
+            // starved backend loop rejects the submit even though the stored
+            // session is fine — resume + retry instead of erroring out and
+            // losing the session binding on the next send.
             const resumed = await requestGateway<{ session_id: string }>('session.resume', {
               session_id: selectedStoredSessionIdRef.current
             })
@@ -1009,8 +1055,10 @@ export function usePromptActions({
         // Routing through the action handler keeps /compress (and any future
         // session-scoped RPC) talking to the live gateway, never the worker.
         const actionSurface = resolveDesktopCommand(`/${name}`)?.surface
+
         if (actionSurface?.kind === 'action') {
           const handler = actionHandlers[actionSurface.action]
+
           if (handler) {
             return handler(ctx)
           }
@@ -1091,6 +1139,7 @@ export function usePromptActions({
           }
 
           const output = result && typeof result === 'object' ? (result as SlashExecResponse) : null
+
           // Backend prints "(._.) No active agent -- send a message first."
           // when an exec-style command runs before the session has an agent.
           // Translate that sentinel into a desktop-side precondition hint so
@@ -1508,12 +1557,14 @@ export function usePromptActions({
             // broke, when in reality a slow-but-eventual compress is
             // still in flight or the server hit its watchdog.
             const rawMessage = err instanceof Error ? err.message : String(err)
+
             const friendlyHint = isCompressTimeoutError(rawMessage)
               ? compressTimeoutHint(rawMessage)
               : null
 
             if (friendlyHint) {
               renderSlashOutput(friendlyHint)
+
               return
             }
 
@@ -1721,6 +1772,7 @@ export function usePromptActions({
 
           const { render: renderSlashOutput, sessionId } = resolved
           const normalized = arg.trim().toLowerCase()
+
           const action: 'on' | 'off' | 'tts' | 'status' =
             normalized === 'on' || normalized === 'off' || normalized === 'tts' || normalized === 'status'
               ? normalized
@@ -1968,6 +2020,7 @@ export function usePromptActions({
 
   const cancelRun = useCallback(async () => {
     const sessionId = activeSessionId || activeSessionIdRef.current
+
     const releaseBusy = () => {
       setMutableRef(busyRef, false)
       setBusy(false)

@@ -64,6 +64,22 @@ function resolveNodePtyRoot() {
   return dirname(pkgJsonPath)
 }
 
+/**
+ * Locate the @electron/rebuild CLI entry. We can't use
+ * `require.resolve('@electron/rebuild/lib/cli.js', ...)` directly because the
+ * package's `exports` map only exposes `./lib/main.js`; CLI lives next to it
+ * as a sibling file, so we resolve the public entry and walk one directory up.
+ *
+ * The shell wrapper at `node_modules/.bin/electron-rebuild` is intentionally
+ * NOT used — passing it to `process.execPath` treats the shell script as a
+ * JavaScript file (the `$(...)` substitutions inside it parse as JS and throw
+ * SyntaxError). Invoking the actual cli.js under Node bypasses that entirely.
+ */
+function resolveElectronRebuildCli() {
+  const mainPath = require.resolve('@electron/rebuild', { paths: [projectRoot] })
+  return join(dirname(mainPath), 'cli.js')
+}
+
 function copyGlobByExt(srcDir, destDir, extensions) {
   if (!existsSync(srcDir)) return
   mkdirSync(destDir, { recursive: true })
@@ -313,8 +329,9 @@ export function stageNodePtyInto(srcRoot, destRoot, { platform = process.platfor
       `[stage-native-deps] no native binary for ${platform}-${arch}; ` +
         `running electron-rebuild (target arch: ${arch})...`
     )
+    const rebuildCliPath = resolveElectronRebuildCli()
     const rebuildArgs = [
-      '../../node_modules/.bin/electron-rebuild',
+      rebuildCliPath,
       '-f',
       '-w',
       'node-pty',
