@@ -32,12 +32,12 @@ import {
   linkSubagentToRun,
   pushWorkflowRunStarted,
   pushWorkflowStepFinished,
-  pushWorkflowStepStarted,
-} from '@/store/workflow-runs'
+  pushWorkflowStepStarted
+} from '../../../store/workflow-runs'
 import type {
   WorkflowRunFinishedPayload,
   WorkflowRunStartedPayload,
-  WorkflowStepFinishedPayload,
+  WorkflowStepFinishedPayload
 } from '@/types/hermes'
 
 export interface WorkflowSubagentInfo {
