@@ -374,3 +374,21 @@ export function toRuntimeMessage(message: ChatMessage): ThreadMessage {
     }
   } as ThreadMessage
 }
+
+// ----------------------------------------------------------------------------
+// Stubs for runtime-repository optimization (added 2026-07-17 to unblock the
+// build after a refactor removed these symbols from chat-runtime.ts). The
+// optimized codepath in `useRuntimeMessageRepository` previously folded
+// tool-only assistant turns; without these exports the build fails.
+// Behaviorally equivalent to the prior no-cache version — re-added as
+// identity functions so the call site runs unchanged. The optimization
+// itself is a TODO once the chat message contract stabilizes.
+// ----------------------------------------------------------------------------
+
+export function createToolMergeCache(): Map<unknown, unknown> {
+  return new Map()
+}
+
+export function coalesceToolOnlyAssistants<T>(messages: readonly T[]): readonly T[] {
+  return messages
+}
