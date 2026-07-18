@@ -3,6 +3,13 @@ import { useEffect, useState } from 'react'
 import { compactNumber } from '@/lib/format'
 import type { UsageStats } from '@/types/hermes'
 
+export function formatK(value: number): string {
+  if (!Number.isFinite(value) || value < 0) return '0'
+  if (value < 1_000) return Math.floor(value).toString()
+  if (value < 1_000_000) return `${(value / 1_000).toFixed(1)}k`
+  return `${(value / 1_000_000).toFixed(1)}M`
+}
+
 export function formatDuration(elapsedMs: number): string {
   const totalSeconds = Math.max(0, Math.floor(elapsedMs / 1000))
   const seconds = totalSeconds % 60
