@@ -389,6 +389,10 @@ export function createToolMergeCache(): Map<unknown, unknown> {
   return new Map()
 }
 
-export function coalesceToolOnlyAssistants<T>(messages: readonly T[]): readonly T[] {
+export function coalesceToolOnlyAssistants<T>(
+  messages: readonly T[],
+  _cache?: unknown
+): readonly T[] {
+  void _cache
   return messages
 }
