@@ -1,5 +1,5 @@
-import { QueryClient } from '@tanstack/react-query'
-import { cleanup, render, renderHook } from '@testing-library/react'
+import { QueryClient, QueryClientProvider, useQuery } from '@tanstack/react-query'
+import { cleanup, render, renderHook, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { getGlobalModelInfo } from '@/hermes'
@@ -34,15 +34,17 @@ type Controls = ReturnType<typeof useModelControls>
 function Harness({
   activeSessionId,
   onReady,
+  queryClient: queryClientProp,
   requestGateway
 }: {
   activeSessionId: string | null
   onReady: (controls: Controls) => void
+  queryClient?: QueryClient
   requestGateway: <T = unknown>(method: string, params?: Record<string, unknown>) => Promise<T>
 }) {
   const controls = useModelControls({
     activeSessionId,
-    queryClient: new QueryClient(),
+    queryClient: queryClientProp ?? new QueryClient(),
     requestGateway
   })
 
@@ -200,5 +202,95 @@ describe('useModelControls', () => {
     // A profile swap forces a reseed to the new profile's default.
     await result.current.refreshCurrentModel(true)
     expect($currentModel.get()).toBe('openai/gpt-5.5')
+  })
+
+  it('keeps the picked model as current after a successful live-session switch, even when the gateway reports the old model first', async () => {
+    // Reproduces the "instant snap back to M3" symptom: config.set succeeds,
+    // but the gateway's model.options RPC still reports the prior model
+    // until the backend applies the change. The renderer must NOT regress
+    // to the old model — neither in the store mirror, nor in the cache
+    // that currentPickerSelection reads.
+    //
+    // The test mounts an active model-options observer so invalidateQueries
+    // actually triggers a refetch (otherwise the optimistic patch sticks
+    // because no observer schedules a re-fetch in jsdom).
+    const staleQueryData = {
+      providers: [] as unknown[],
+      model: 'MiniMax-M3',
+      provider: 'MiniMax'
+    }
+
+    const requestGateway = vi.fn(async (method: string) => {
+      if (method === 'config.set') {
+        return { key: 'model', value: 'sonnet --provider anthropic --session' } as never
+      }
+
+      if (method === 'model.options') {
+        // Stale response: backend hasn't propagated config.set yet.
+        return staleQueryData as never
+      }
+
+      return {} as never
+    })
+
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false } }
+    })
+
+    queryClient.setQueryData(['model-options', 'session-1'], staleQueryData)
+
+    const Observer = () => {
+      useQuery({
+        queryKey: ['model-options', 'session-1'],
+        queryFn: () => requestGateway('model.options'),
+        staleTime: 0,
+        refetchOnMount: 'always'
+      })
+
+      return null
+    }
+
+    let controls!: Controls
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <Observer />
+        <Harness
+          activeSessionId="session-1"
+          onReady={value => (controls = value)}
+          queryClient={queryClient}
+          requestGateway={requestGateway}
+        />
+      </QueryClientProvider>
+    )
+
+    // Wait for the observer's first refetch to settle so the cache contains
+    // the stale M3 data before selectModel runs.
+    await waitFor(() => {
+      expect(queryClient.getQueryData(['model-options', 'session-1'])).toEqual(staleQueryData)
+    })
+
+    await expect(
+      controls.selectModel({
+        model: 'sonnet',
+        provider: 'anthropic'
+      })
+    ).resolves.toBe(true)
+
+    // Give the post-config.set invalidateQueries refetch a chance to fire and
+    // (under the bug) clobber the optimistic patch.
+    await new Promise(resolve => setTimeout(resolve, 50))
+
+    // The user's pick survives in the UI mirror.
+    expect($currentModel.get()).toBe('sonnet')
+    expect($currentProvider.get()).toBe('anthropic')
+
+    // The model-options cache reflects the pick, not the stale RPC response.
+    // The optimistic patch from updateModelOptionsCache must NOT be clobbered
+    // by the post-config.set invalidateQueries refetch.
+    const cached = queryClient.getQueryData<{ model?: string; provider?: string }>(['model-options', 'session-1'])
+
+    expect(cached?.model).toBe('sonnet')
+    expect(cached?.provider).toBe('anthropic')
   })
 })

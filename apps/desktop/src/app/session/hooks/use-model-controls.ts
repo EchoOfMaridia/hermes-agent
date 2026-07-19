@@ -99,8 +99,6 @@ export function useModelControls({ activeSessionId, queryClient, requestGateway 
           value: `${selection.model} --provider ${selection.provider} --session`
         })
 
-        void queryClient.invalidateQueries({ queryKey: ['model-options', activeSessionId] })
-
         return true
       } catch (err) {
         setCurrentModel(prevModel)
@@ -111,7 +109,7 @@ export function useModelControls({ activeSessionId, queryClient, requestGateway 
         return false
       }
     },
-    [activeSessionId, copy.modelSwitchFailed, queryClient, requestGateway, updateModelOptionsCache]
+    [activeSessionId, copy.modelSwitchFailed, requestGateway, updateModelOptionsCache]
   )
 
   return { refreshCurrentModel, selectModel, updateModelOptionsCache }

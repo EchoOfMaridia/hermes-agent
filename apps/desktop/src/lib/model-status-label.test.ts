@@ -47,20 +47,31 @@ describe('model-status-label', () => {
     const store = { model: 'opus', provider: 'anthropic' }
     const options = { model: 'hermes-4', provider: 'nous' }
 
-    it('prefers the sticky composer pick over the profile default pre-session', () => {
+    it('returns the store pick when both store and options are populated', () => {
+      // The user's pick is the authoritative source — it must not regress to
+      // a stale options value, even on a live session where the backend's
+      // model.options RPC may lag behind a fresh config.set write.
+      expect(currentPickerSelection(true, store, options)).toEqual(store)
       expect(currentPickerSelection(false, store, options)).toEqual(store)
-    })
-
-    it('lets the live session model.options win when a session exists', () => {
-      expect(currentPickerSelection(true, store, options)).toEqual(options)
     })
 
     it('falls back to options when the store is empty', () => {
       expect(currentPickerSelection(false, { model: '', provider: '' }, options)).toEqual(options)
+      expect(currentPickerSelection(true, { model: '', provider: '' }, options)).toEqual(options)
     })
 
-    it('falls back to the store while options are still loading', () => {
-      expect(currentPickerSelection(true, store, undefined)).toEqual(store)
+    it('returns an empty selection when both store and options are missing', () => {
+      expect(currentPickerSelection(true, { model: '', provider: '' }, undefined)).toEqual({
+        model: '',
+        provider: ''
+      })
+    })
+
+    it('uses store when options are partial and store is populated', () => {
+      // A store pick should not be silently replaced by a partial options
+      // snapshot — the pick is the user's intent, partial info isn't enough
+      // to justify an override.
+      expect(currentPickerSelection(true, store, { model: '', provider: 'nous' })).toEqual(store)
     })
   })
 })

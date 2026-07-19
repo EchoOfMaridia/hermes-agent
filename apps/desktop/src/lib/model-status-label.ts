@@ -21,19 +21,20 @@ export function reasoningEffortLabel(effort: string): string {
   return REASONING_LABELS[key] ?? effort
 }
 
-/** Which model/provider a picker should mark "current". With a live session the
- *  gateway's `model.options` is authoritative; pre-session there is no server
- *  "current", so the sticky composer pick wins over the profile default the
- *  global options query returns — else the checkmark snaps back to the default
- *  and the pick looks ignored. */
+/** Which model/provider a picker should mark "current". The user's pick
+ *  (sticky store state) wins over the backend's `model.options` query —
+ *  the options query can lag behind a fresh `config.set` (the gateway
+ *  applies the change asynchronously), and during that window the
+ *  authoritative answer is the store. Options win only when the store is
+ *  empty (e.g. the backend is the first source of truth on boot). */
 export function currentPickerSelection(
   hasSession: boolean,
   store: { model: string; provider: string },
   options?: { model?: string; provider?: string }
 ): { model: string; provider: string } {
   return {
-    model: String((hasSession && options?.model) || store.model || options?.model || ''),
-    provider: String((hasSession && options?.provider) || store.provider || options?.provider || '')
+    model: String(store.model || options?.model || ''),
+    provider: String(store.provider || options?.provider || '')
   }
 }
 
