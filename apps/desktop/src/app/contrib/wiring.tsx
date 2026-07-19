@@ -231,7 +231,6 @@ export function ContribWiring({ children }: { children: ReactNode }) {
   })
 
   const { refreshCurrentModel, selectModel, updateModelOptionsCache } = useModelControls({
-    activeSessionId,
     queryClient,
     requestGateway
   })
@@ -604,7 +603,7 @@ export function ContribWiring({ children }: { children: ReactNode }) {
       dispatchWorkflowEvent(workflowRouter, {
         type: String(event.type),
         session_id: event.session_id,
-        payload: event.payload as Record<string, unknown>,
+        payload: event.payload as Record<string, unknown>
       })
     },
     [handleDesktopGatewayEvent, workflowRouter]

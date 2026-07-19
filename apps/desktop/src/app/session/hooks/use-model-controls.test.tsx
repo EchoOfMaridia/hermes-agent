@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider, useQuery } from '@tanstack/react-query'
-import { cleanup, render, renderHook, waitFor } from '@testing-library/react'
+import { act, cleanup, render, renderHook, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { getGlobalModelInfo } from '@/hermes'
@@ -32,18 +32,15 @@ vi.mock('@/store/notifications', () => ({
 type Controls = ReturnType<typeof useModelControls>
 
 function Harness({
-  activeSessionId,
   onReady,
   queryClient: queryClientProp,
   requestGateway
 }: {
-  activeSessionId: string | null
   onReady: (controls: Controls) => void
   queryClient?: QueryClient
   requestGateway: <T = unknown>(method: string, params?: Record<string, unknown>) => Promise<T>
 }) {
   const controls = useModelControls({
-    activeSessionId,
     queryClient: queryClientProp ?? new QueryClient(),
     requestGateway
   })
@@ -76,7 +73,6 @@ describe('useModelControls', () => {
 
     const { result } = renderHook(() =>
       useModelControls({
-        activeSessionId: null,
         queryClient: new QueryClient(),
         requestGateway: vi.fn()
       })
@@ -99,7 +95,6 @@ describe('useModelControls', () => {
 
     const { result } = renderHook(() =>
       useModelControls({
-        activeSessionId: 'runtime-1',
         queryClient: new QueryClient(),
         requestGateway: vi.fn()
       })
@@ -112,12 +107,11 @@ describe('useModelControls', () => {
   })
 
   it('routes active-session picker changes through config.set with an explicit session-scoped provider', async () => {
+    $activeSessionId.set('session-1')
     const requestGateway = vi.fn(async () => ({ key: 'model', value: 'claude-sonnet-4.6' }) as never)
     let controls!: Controls
 
-    render(
-      <Harness activeSessionId="session-1" onReady={value => (controls = value)} requestGateway={requestGateway} />
-    )
+    render(<Harness onReady={value => (controls = value)} requestGateway={requestGateway} />)
 
     await expect(
       controls.selectModel({
@@ -134,13 +128,37 @@ describe('useModelControls', () => {
     expect(requestGateway).not.toHaveBeenCalledWith('slash.exec', expect.anything())
   })
 
+  it('reads the live session when a stable model callback is invoked after navigation', async () => {
+    const requestGateway = vi.fn(async () => ({ key: 'model', value: 'claude-sonnet-4.6' }) as never)
+    let controls!: Controls
+
+    render(<Harness onReady={value => (controls = value)} requestGateway={requestGateway} />)
+
+    // wiring.tsx keeps one stable actions object for memoized surfaces. The
+    // callback can therefore be captured before a session exists, then invoked
+    // after navigation activates an existing thread without being re-captured.
+    $activeSessionId.set('session-1')
+
+    await expect(
+      controls.selectModel({
+        model: 'claude-sonnet-4.6',
+        provider: 'anthropic'
+      })
+    ).resolves.toBe(true)
+
+    expect(requestGateway).toHaveBeenCalledWith('config.set', {
+      session_id: 'session-1',
+      key: 'model',
+      value: 'claude-sonnet-4.6 --provider anthropic --session'
+    })
+  })
+
   it('session-scopes MoA preset selections so they cannot persist as the global gateway default', async () => {
+    $activeSessionId.set('session-1')
     const requestGateway = vi.fn(async () => ({ key: 'model', value: 'BeastMode' }) as never)
     let controls!: Controls
 
-    render(
-      <Harness activeSessionId="session-1" onReady={value => (controls = value)} requestGateway={requestGateway} />
-    )
+    render(<Harness onReady={value => (controls = value)} requestGateway={requestGateway} />)
 
     await expect(
       controls.selectModel({
@@ -160,7 +178,7 @@ describe('useModelControls', () => {
     const requestGateway = vi.fn()
     let controls!: Controls
 
-    render(<Harness activeSessionId={null} onReady={value => (controls = value)} requestGateway={requestGateway} />)
+    render(<Harness onReady={value => (controls = value)} requestGateway={requestGateway} />)
 
     await expect(
       controls.selectModel({
@@ -182,7 +200,6 @@ describe('useModelControls', () => {
 
     const { result } = renderHook(() =>
       useModelControls({
-        activeSessionId: null,
         queryClient: new QueryClient(),
         requestGateway: vi.fn()
       })
@@ -252,15 +269,12 @@ describe('useModelControls', () => {
 
     let controls!: Controls
 
+    $activeSessionId.set('session-1')
+
     render(
       <QueryClientProvider client={queryClient}>
         <Observer />
-        <Harness
-          activeSessionId="session-1"
-          onReady={value => (controls = value)}
-          queryClient={queryClient}
-          requestGateway={requestGateway}
-        />
+        <Harness onReady={value => (controls = value)} queryClient={queryClient} requestGateway={requestGateway} />
       </QueryClientProvider>
     )
 
@@ -270,16 +284,21 @@ describe('useModelControls', () => {
       expect(queryClient.getQueryData(['model-options', 'session-1'])).toEqual(staleQueryData)
     })
 
-    await expect(
-      controls.selectModel({
+    let switched = false
+
+    await act(async () => {
+      switched = await controls.selectModel({
         model: 'sonnet',
         provider: 'anthropic'
       })
-    ).resolves.toBe(true)
 
-    // Give the post-config.set invalidateQueries refetch a chance to fire and
-    // (under the bug) clobber the optimistic patch.
-    await new Promise(resolve => setTimeout(resolve, 50))
+      // Give the old post-config.set invalidateQueries refetch a chance to fire
+      // and clobber the optimistic patch. Keeping the wait inside act also
+      // flushes the observer update before assertions.
+      await new Promise(resolve => setTimeout(resolve, 50))
+    })
+
+    expect(switched).toBe(true)
 
     // The user's pick survives in the UI mirror.
     expect($currentModel.get()).toBe('sonnet')
