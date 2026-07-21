@@ -138,6 +138,17 @@ def register(ctx) -> None:
     if fallback_sink is not None:
         ctx._fallback_sink = fallback_sink
 
+    # Register the desktop wire-format bridge so the Hermes desktop
+    # Workflows panel populates from real workflow runs (Pitfall #57
+    # fix, shipped 2026-07-19). The bridge wraps the existing dispatcher
+    # so the gateway pipeline AND the fallback sink keep working AND
+    # the desktop JSON-RPC envelopes are emitted in the same dispatch.
+    try:
+        from plugins.hermes_workflow.desktop_event_bridge import get_bridge
+        get_bridge().register(runtime)
+    except Exception as e:
+        _log.debug("desktop_event_bridge register failed: %s", e)
+
     # Surface 1: CLI subcommands.
     def _cli_default_handler(args):
         import asyncio as _aio

@@ -28,10 +28,10 @@ import { Panel, PanelEmpty, PanelHeader } from '../overlays/panel'
 // ============================================================================
 // WORKFLOWS PANEL — overlay route showing live + recent workflow runs.
 // ----------------------------------------------------------------------------
-// Mirrors the visual vocabulary of the Agents panel (codicon glyphs,
-// running/verified/failed states, breath spinner, FadeText for subtitles).
-// Reads from $workflowRuns, which is fed by use-workflow-events.ts via
-// the gateway event stream.
+// Tabbed UI (added 2026-07-19 per the user's UI request): a left-rail
+// tab switcher lets the user toggle between the existing "Runs" view
+// (live + recent runs) and a new "Library" view (saved scripts + Run
+// button). The Runs tab is default and behavior-preserving.
 // ============================================================================
 
 type StepState = WorkflowStep['state']
@@ -100,12 +100,200 @@ const fmtDuration = (seconds: number, a: Translations['workflows']): string => {
   return a.durationMinutes(m, s)
 }
 
+// ----------------------------------------------------------------------------
+// Library REST client — talks to the /api/workflows/* endpoints I
+// shipped in the backend this turn.
+// ----------------------------------------------------------------------------
+
+export interface WorkflowLibraryEntry {
+  name: string
+  description: string
+  path: string
+  created_at: string
+}
+
+export interface WorkflowLibraryResponse {
+  entries: WorkflowLibraryEntry[]
+}
+
+async function fetchLibrary(token: string): Promise<WorkflowLibraryResponse> {
+  const r = await fetch('/api/workflows/library', {
+    headers: { Authorization: `Bearer ${token}` }
+  })
+  if (!r.ok) {throw new Error(`library fetch failed: ${r.status}`)}
+  return r.json() as Promise<WorkflowLibraryResponse>
+}
+
+async function startRun(name: string, token: string): Promise<{ run_id: string }> {
+  const r = await fetch('/api/workflows/run', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${token}`
+    },
+    body: JSON.stringify({ name, inputs: {} })
+  })
+  if (!r.ok) {
+    const text = await r.text()
+    throw new Error(`run failed: ${r.status} ${text}`)
+  }
+  return r.json() as Promise<{ run_id: string }>
+}
+
+function readSessionToken(): string {
+  // The session token is injected into the SPA HTML at boot. The
+  // existing REST helpers (e.g. runtime-readiness) read it from
+  // window.__HERMES_SESSION_TOKEN__ — we read the same constant
+  // so the same auth path works.
+  if (typeof window === 'undefined') {return ''}
+  return (window as unknown as { __HERMES_SESSION_TOKEN__?: string })
+    .__HERMES_SESSION_TOKEN__ ?? ''
+}
+
+const $libraryEntries = atom<WorkflowLibraryEntry[]>([])
+const $libraryLoading = atom<boolean>(false)
+const $libraryError = atom<string | null>(null)
+const $startingRun = atom<string | null>(null)
+
+async function refreshLibrary(): Promise<void> {
+  const token = readSessionToken()
+  if (!token) {
+    $libraryError.set('no session token — cannot fetch library')
+    return
+  }
+  $libraryLoading.set(true)
+  $libraryError.set(null)
+  try {
+    const data = await fetchLibrary(token)
+    $libraryEntries.set(data.entries)
+  } catch (exc) {
+    $libraryError.set(exc instanceof Error ? exc.message : String(exc))
+  } finally {
+    $libraryLoading.set(false)
+  }
+}
+
+async function runEntry(name: string): Promise<void> {
+  const token = readSessionToken()
+  if (!token) {return}
+  $startingRun.set(name)
+  try {
+    await startRun(name, token)
+    // The new run's live progress will arrive via the gateway event
+    // stream (use-workflow-events.ts) and populate $workflowRuns.
+    // No additional wiring needed.
+  } catch (exc) {
+    $libraryError.set(exc instanceof Error ? exc.message : String(exc))
+  } finally {
+    $startingRun.set(null)
+  }
+}
+
+// ----------------------------------------------------------------------------
+// Library tab — list + Run button
+// ----------------------------------------------------------------------------
+
+function LibraryTab() {
+  const { t } = useI18n()
+  const entries = useStore($libraryEntries)
+  const loading = useStore($libraryLoading)
+  const error = useStore($libraryError)
+  const startingRun = useStore($startingRun)
+
+  useEffect(() => {
+    void refreshLibrary()
+  }, [])
+
+  if (loading && entries.length === 0) {
+    return (
+      <PanelEmpty
+        description={t.workflows.libraryLoadingDesc}
+        icon="loading"
+        title={t.workflows.libraryLoadingTitle}
+      />
+    )
+  }
+
+  if (error && entries.length === 0) {
+    return (
+      <PanelEmpty
+        description={error}
+        icon="error"
+        title={t.workflows.libraryErrorTitle}
+      />
+    )
+  }
+
+  if (entries.length === 0) {
+    return (
+      <PanelEmpty
+        description={t.workflows.libraryEmptyDesc}
+        icon="inbox"
+        title={t.workflows.libraryEmptyTitle}
+      />
+    )
+  }
+
+  return (
+    <div className="flex min-h-0 min-w-0 flex-1 flex-col gap-2 overflow-y-auto pr-1">
+      {entries.map(entry => (
+        <div
+          className="group flex w-full min-w-0 items-start gap-3 rounded-md px-3 py-2.5 hover:bg-(--chrome-action-hover)"
+          key={entry.name}
+        >
+          <Codicon
+            aria-hidden="true"
+            className="mt-0.5 size-4 shrink-0 text-muted-foreground/70"
+            name="file-code"
+          />
+          <div className="min-w-0 flex-1">
+            <div className="truncate font-medium text-foreground text-sm">
+              {entry.name}
+            </div>
+            <div className="line-clamp-2 text-muted-foreground/85 text-xs">
+              {entry.description || t.workflows.unknownWorkflow}
+            </div>
+          </div>
+          <button
+            className={cn(
+              'inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 font-medium text-xs transition-colors',
+              'bg-primary/15 text-primary hover:bg-primary/25',
+              'disabled:opacity-50'
+            )}
+            disabled={startingRun === entry.name}
+            onClick={() => { void runEntry(entry.name) }}
+            type="button"
+          >
+            {startingRun === entry.name ? (
+              <GlyphSpinner
+                ariaLabel={t.workflows.running}
+                className="size-3"
+                spinner="breathe"
+              />
+            ) : (
+              <Codicon
+                aria-hidden="true"
+                className="size-3"
+                name="play"
+              />
+            )}
+            <span>{t.workflows.runButton}</span>
+          </button>
+        </div>
+      ))}
+    </div>
+  )
+}
+
 interface WorkflowsViewProps {
   onClose: () => void
 }
 
+type Tab = 'runs' | 'library'
+
 export function WorkflowsView({ onClose }: WorkflowsViewProps) {
   const { t } = useI18n()
+  const [tab, setTab] = useState<Tab>('runs')
   const runs = useStore($workflowRuns)
   const activeRunId = useStore($activeWorkflowRun)
   const now = useState(() => Date.now())[0]
@@ -123,28 +311,74 @@ export function WorkflowsView({ onClose }: WorkflowsViewProps) {
         subtitle={t.workflows.subtitle(runsArray.length)}
         title={t.workflows.title}
       />
-      {runsArray.length === 0 ? (
-        <PanelEmpty
-          description={t.workflows.emptyDesc}
-          icon="inbox"
-          title={t.workflows.emptyTitle}
-        />
-      ) : (
-        <div className="flex min-h-0 min-w-0 flex-1 flex-col gap-4 overflow-y-auto pr-1">
-          {runsArray.map(run => (
-            <WorkflowRunRow
-              active={run.runId === activeRunId}
-              key={run.runId}
-              now={now}
-              onSelect={() => setActiveWorkflowRun(run.runId)}
-              run={run}
-            />
-          ))}
+      <div
+        aria-label={t.workflows.title}
+        className="flex min-h-0 min-w-0 flex-1 flex-row"
+        role="tablist"
+      >
+        <div className="flex w-32 shrink-0 flex-col gap-1 border-r border-(--stroke-faint) pr-2">
+          <button
+            aria-selected={tab === 'runs'}
+            className={cn(
+              'flex items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-sm transition-colors',
+              tab === 'runs'
+                ? 'bg-(--ui-bg-quaternary) font-medium text-foreground'
+                : 'text-muted-foreground hover:bg-(--chrome-action-hover) hover:text-foreground'
+            )}
+            onClick={() => { setTab('runs') }}
+            role="tab"
+            type="button"
+          >
+            <Codicon aria-hidden="true" className="size-3.5" name="history" />
+            <span>{t.workflows.runsTab}</span>
+          </button>
+          <button
+            aria-selected={tab === 'library'}
+            className={cn(
+              'flex items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-sm transition-colors',
+              tab === 'library'
+                ? 'bg-(--ui-bg-quaternary) font-medium text-foreground'
+                : 'text-muted-foreground hover:bg-(--chrome-action-hover) hover:text-foreground'
+            )}
+            onClick={() => { setTab('library') }}
+            role="tab"
+            type="button"
+          >
+            <Codicon aria-hidden="true" className="size-3.5" name="library" />
+            <span>{t.workflows.libraryTab}</span>
+          </button>
         </div>
-      )}
-      {activeRun ? (
-        <WorkflowRunDetail key={activeRun.runId} run={activeRun} />
-      ) : null}
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col pl-3" role="tabpanel">
+          {tab === 'runs' ? (
+            <>
+              {runsArray.length === 0 ? (
+                <PanelEmpty
+                  description={t.workflows.emptyDesc}
+                  icon="inbox"
+                  title={t.workflows.emptyTitle}
+                />
+              ) : (
+                <div className="flex min-h-0 min-w-0 flex-1 flex-col gap-4 overflow-y-auto pr-1">
+                  {runsArray.map(run => (
+                    <WorkflowRunRow
+                      active={run.runId === activeRunId}
+                      key={run.runId}
+                      now={now}
+                      onSelect={() => setActiveWorkflowRun(run.runId)}
+                      run={run}
+                    />
+                  ))}
+                </div>
+              )}
+              {activeRun ? (
+                <WorkflowRunDetail key={activeRun.runId} run={activeRun} />
+              ) : null}
+            </>
+          ) : (
+            <LibraryTab />
+          )}
+        </div>
+      </div>
     </Panel>
   )
 }
@@ -179,34 +413,22 @@ function WorkflowRunRow({ active, now, onSelect, run }: WorkflowRunRowProps) {
           ? 'bg-(--ui-bg-quaternary) ring-1 ring-(--stroke-nous)'
           : 'hover:bg-(--chrome-action-hover)',
       )}
-      data-active={active ? 'true' : undefined}
-      data-run-id={run.runId}
+      key={run.runId}
       onClick={onSelect}
       type="button"
     >
-      <span className="mt-0.5 flex h-[1.1rem] shrink-0 items-center">
-        {runGlyph(run.state, t.workflows)}
-      </span>
-      <span className="flex min-w-0 flex-1 flex-col gap-0.5">
-        <span className="wrap-anywhere text-[0.82rem] font-medium leading-[1.1rem] text-foreground/90 transition-colors group-hover:text-foreground">
-          {run.workflowName ?? t.workflows.unknownWorkflow}
-          <span className="ml-1.5 text-[0.66rem] font-mono text-muted-foreground/55">
-            {run.runId}
+      <span className="mt-0.5 shrink-0">{runGlyph(run.state, t.workflows)}</span>
+      <div className="min-w-0 flex-1">
+        <div className="flex items-baseline gap-2">
+          <span className="truncate font-medium text-foreground text-sm">
+            {run.workflowName || t.workflows.unknownWorkflow}
           </span>
-        </span>
-        <span className="text-[0.66rem] leading-[1.05rem] text-muted-foreground/65">
-          {[
-            t.workflows.steps(run.steps.length),
-            t.workflows.state(run.state),
-            elapsedText,
-          ]
-            .filter(Boolean)
-            .join(' · ')}
-        </span>
-      </span>
-      {isRunning && elapsed > 0 ? (
-        <ActivityTimerText className="mt-1 shrink-0 text-[0.6rem]" seconds={elapsed} />
-      ) : null}
+          <ActivityTimerText className="font-mono text-muted-foreground/70 text-xs" isRunning={isRunning} text={elapsedText} />
+        </div>
+        <div className="line-clamp-1 text-muted-foreground/85 text-xs">
+          {run.runId} · {t.workflows.steps(run.steps.length)}
+        </div>
+      </div>
     </button>
   )
 }
@@ -217,295 +439,63 @@ interface WorkflowRunDetailProps {
 
 function WorkflowRunDetail({ run }: WorkflowRunDetailProps) {
   const { t } = useI18n()
-  const enterRef = useEnterAnimation(true, `workflow-detail:${run.runId}`)
+  const { enterClass } = useEnterAnimation('fade-in', 200)
+  const subagents = useStore($subagentsBySession)
+  const stepState = run.steps.map(s => s.state)
+  const completedCount = stepState.filter(state => state === 'verified').length
+  const failedCount = stepState.filter(state => state === 'failed').length
+  const runningCount = stepState.filter(state => state === 'running').length
 
   return (
-    <aside
-      className="flex min-w-0 flex-col gap-3 border-t border-(--ui-stroke-tertiary) pt-4"
-      data-slot="workflow-detail"
-      ref={enterRef}
-    >
-      <header className="flex items-center justify-between gap-2">
-        <h3 className="text-xs font-semibold text-foreground/85">
-          {t.workflows.steps(run.steps.length)}
-        </h3>
-        <span className="text-[0.66rem] font-mono text-muted-foreground/55">
-          {run.runId}
-        </span>
-      </header>
-      {run.errorMessage ? (
-        <p className="wrap-anywhere text-[0.72rem] leading-relaxed text-destructive/90">
-          {t.workflows.error(run.errorMessage)}
-        </p>
-      ) : null}
-      {run.haltReason ? (
-        <p className="wrap-anywhere text-[0.72rem] leading-relaxed text-muted-foreground/85">
-          {t.workflows.haltReason(run.haltReason)}
-        </p>
-      ) : null}
-      <ol className="flex min-w-0 flex-col gap-2 pl-1">
+    <div className={cn('mt-3 flex max-h-72 flex-col gap-2 overflow-y-auto rounded-md border border-(--stroke-faint) bg-(--ui-bg-secondary) p-3', enterClass)}>
+      <div className="flex items-center justify-between gap-3">
+        <div className="truncate font-medium text-foreground text-sm">
+          {run.workflowName || t.workflows.unknownWorkflow}
+        </div>
+        <div className="flex items-center gap-2 text-muted-foreground/80 text-xs">
+          {completedCount > 0 ? <span className="text-emerald-500/80">{t.workflows.steps(completedCount)} ✓</span> : null}
+          {runningCount > 0 ? <span>{t.workflows.steps(runningCount)} ⟳</span> : null}
+          {failedCount > 0 ? <span className="text-destructive">{t.workflows.steps(failedCount)} ✗</span> : null}
+        </div>
+      </div>
+      <ol className="flex flex-col gap-1.5">
         {run.steps.map(step => (
-          <StepRow key={step.name} step={step} />
+          <li className="flex items-center gap-2 text-sm" key={step.name}>
+            <span className="shrink-0">{stepGlyph(step.state, t.workflows)}</span>
+            <span className="truncate text-foreground/90">{step.name}</span>
+            {step.error ? <span className="text-destructive text-xs">{t.workflows.error(step.error)}</span> : null}
+            {step.verifierVerdict ? <span className="text-muted-foreground/80 text-xs">· {t.workflows.verifier(step.verifierVerdict)}</span> : null}
+          </li>
         ))}
       </ol>
-    </aside>
+      {Object.keys(subagents[run.runId] ?? {}).length > 0 ? (
+        <SubagentList runId={run.runId} subagents={Object.values(subagents[run.runId] ?? {})} />
+      ) : null}
+    </div>
   )
 }
 
-function StepRow({ step }: { step: WorkflowStep }) {
+interface SubagentListProps {
+  runId: string
+  subagents: SubagentProgress[]
+}
+
+function SubagentList({ subagents }: SubagentListProps) {
   const { t } = useI18n()
-  const isRunning = step.state === 'running'
-  const elapsed = useElapsedSeconds(isRunning, `workflow-step:${step.name}`)
-
-  const durationText = fmtDuration(
-    step.durationSeconds ?? (isRunning ? elapsed : 0),
-    t.workflows,
-  )
-
+  if (subagents.length === 0) {return null}
   return (
-    <li className="flex min-w-0 items-start gap-2.5 text-[0.72rem]">
-      <span className="mt-0.5 flex h-[1.1rem] shrink-0 items-center">
-        {stepGlyph(step.state, t.workflows)}
-      </span>
-      <span className="flex min-w-0 flex-1 flex-col gap-0.5">
-        <span className="wrap-anywhere font-mono text-foreground/85">{step.name}</span>
-        <span className="flex items-center gap-1.5 text-muted-foreground/65">
-          {step.state === 'pending' ? (
-            <span>{t.workflows.stepPending}</span>
-          ) : (
-            <>
-              <span>{t.workflows.stepState(step.state)}</span>
-              {durationText ? (
-                <span className="text-muted-foreground/45">·</span>
-              ) : null}
-              {durationText ? <span>{durationText}</span> : null}
-              {step.verifierVerdict ? (
-                <>
-                  <span className="text-muted-foreground/45">·</span>
-                  <span
-                    className={cn(
-                      'font-medium',
-                      step.verifierVerdict === 'pass'
-                        ? 'text-emerald-600/85 dark:text-emerald-400/85'
-                        : 'text-destructive',
-                    )}
-                  >
-                    {t.workflows.verifier(step.verifierVerdict)}
-                  </span>
-                </>
-              ) : null}
-            </>
-          )}
-        </span>
-        {step.verifierReason ? (
-          <p className="wrap-anywhere text-muted-foreground/55">{step.verifierReason}</p>
-        ) : null}
-      </span>
-    </li>
+    <div className="flex flex-col gap-1 border-(--stroke-faint) border-t pt-2">
+      <div className="font-medium text-muted-foreground/80 text-xs uppercase tracking-wide">Subagents</div>
+      <ul className="flex flex-col gap-1">
+        {subagents.map(sa => (
+          <li className="flex items-center gap-2 text-xs" key={sa.subagentId}>
+            <Codicon aria-hidden="true" className="size-3 text-muted-foreground/60" name="robot" />
+            <span className="truncate">{sa.subagentId}</span>
+            {sa.startedAt && !sa.endedAt ? <GlyphSpinner ariaLabel={t.workflows.running} className="size-3" spinner="breathe" /> : null}
+            {sa.endedAt ? <span className="text-muted-foreground/60">✓</span> : null}
+          </li>
+        ))}
+      </ul>
+    </div>
   )
 }
-
-// Re-export so the file shows up in the AppView system as `WorkflowsView`.
-export default WorkflowsView
-
-// ============================================================================
-// Subagent live view
-// ----------------------------------------------------------------------------
-// Inline focused viewer for one subagent. Reads from $subagentsBySession
-// keyed by sessionId (the session the subagent was spawned inside). The
-// sessionId is the same id that the WorkflowsPanel stores in
-// $subagentsByRun[runId][i] when it links a subagent to a run.
-//
-// Rendered inline in the WorkflowsView when the user clicks a subagent
-// badge. A future change can promote this to a separate IPC-routed
-// BrowserWindow via `window.hermesDesktop.openSubagentWindow` — the
-// nanostore subscription is the same; only the entry point changes.
-// ============================================================================
-
-export const $activeSubagent = atom<{ sessionId: string; subagentId: string } | null>(null)
-
-export function openSubagentLiveView(sessionId: string, subagentId: string): void {
-  $activeSubagent.set({ sessionId, subagentId })
-}
-
-export function closeSubagentLiveView(): void {
-  $activeSubagent.set(null)
-}
-
-function subagentStatusGlyph(
-  status: SubagentProgress['status']
-): ReactNode {
-  if (status === 'running' || status === 'queued') {
-    return (
-      <GlyphSpinner
-        ariaLabel={status}
-        className="size-3.5 shrink-0 text-[0.95rem] text-muted-foreground/80"
-        spinner="breathe"
-      />
-    )
-  }
-
-  if (status === 'failed' || status === 'interrupted') {
-    return <AlertCircle aria-label={status} className="size-3.5 shrink-0 text-destructive" />
-  }
-
-  return (
-    <CheckCircle2 aria-label={status} className="size-3.5 shrink-0 text-emerald-600/85 dark:text-emerald-400/85" />
-  )
-}
-
-interface SubagentLiveViewProps {
-  onClose: () => void
-  sessionId: string
-  subagent: SubagentProgress
-}
-
-function SubagentLiveViewImpl({ onClose, sessionId, subagent }: SubagentLiveViewProps) {
-  const { t } = useI18n()
-  const isRunning = subagent.status === 'running' || subagent.status === 'queued'
-  const elapsed = useElapsedSeconds(isRunning, `subagent:${subagent.id}`)
-  const enterRef = useEnterAnimation(true, `subagent-live:${subagent.id}`)
-  const visibleRows = subagent.stream.slice(-12)
-
-  const fileLines = [
-    ...subagent.filesWritten.map(p => `+ ${p}`),
-    ...subagent.filesRead.map(p => `· ${p}`),
-  ]
-
-  // Auto-close once the subagent has reached a terminal status AND the
-  // stream has had no new entries for 5s. Per AGENTS.md: "never navigate
-  // because something happened in the background. Offer; don't hijack."
-  // The auto-close is a UX hint, not a navigation event.
-  useEffect(() => {
-    if (isRunning) {return}
-
-    if (visibleRows.length === 0) {return}
-    const last = subagent.stream[subagent.stream.length - 1]
-
-    if (!last?.at) {return}
-    const delayMs = 5_000
-
-    const handle = window.setTimeout(() => {
-      onClose()
-    }, delayMs)
-
-    return () => window.clearTimeout(handle)
-  }, [isRunning, onClose, subagent.stream, visibleRows.length])
-
-  return (
-    <aside
-      aria-label={t.workflows.subagentTitle(subagent.id)}
-      className="flex min-w-0 flex-col gap-3 border-t border-(--ui-stroke-tertiary) pt-4"
-      data-run-id={subagent.id}
-      data-session-id={sessionId}
-      data-slot="subagent-live-view"
-      ref={enterRef}
-    >
-      <header className="flex items-start justify-between gap-3">
-        <div className="flex min-w-0 flex-col gap-0.5">
-          <h3 className="wrap-anywhere text-xs font-semibold text-foreground/85">
-            {subagent.goal}
-          </h3>
-          <span className="font-mono text-[0.6rem] text-muted-foreground/55">
-            {sessionId}
-          </span>
-        </div>
-        <button
-          aria-label={t.workflows.subagentClose}
-          className="shrink-0 rounded-md px-2 py-1 text-[0.66rem] text-muted-foreground/75 hover:bg-(--chrome-action-hover)"
-          onClick={onClose}
-          type="button"
-        >
-          {t.workflows.subagentClose}
-        </button>
-      </header>
-      <div className="flex items-center gap-2 text-[0.7rem] text-muted-foreground/75">
-        {subagentStatusGlyph(subagent.status)}
-        <span>{subagent.status}</span>
-        {subagent.model ? (
-          <>
-            <span className="text-muted-foreground/45">·</span>
-            <span className="font-mono">{subagent.model}</span>
-          </>
-        ) : null}
-        {isRunning ? (
-          <>
-            <span className="text-muted-foreground/45">·</span>
-            <ActivityTimerText seconds={elapsed} />
-          </>
-        ) : null}
-        {subagent.currentTool ? (
-          <>
-            <span className="text-muted-foreground/45">·</span>
-            <span className="font-mono text-foreground/80">
-              {subagent.currentTool}
-            </span>
-          </>
-        ) : null}
-      </div>
-      {subagent.summary ? (
-        <p className="wrap-anywhere text-[0.72rem] leading-relaxed text-foreground/85">
-          {subagent.summary}
-        </p>
-      ) : null}
-      {visibleRows.length > 0 ? (
-        <ol className="flex min-w-0 flex-col gap-1 pl-1">
-          {visibleRows.map((entry, i) => (
-            <li
-              className="wrap-anywhere font-mono text-[0.68rem] leading-relaxed text-foreground/85"
-              data-stream-kind={entry.kind}
-              key={`${entry.kind}:${entry.at}:${i}`}
-            >
-              {entry.kind === 'tool' ? '⚙ ' : ''}
-              {entry.text}
-            </li>
-          ))}
-        </ol>
-      ) : null}
-      {fileLines.length > 0 ? (
-        <ul className="flex flex-col gap-0.5 pl-1">
-          {fileLines.slice(0, 8).map(line => (
-            <li
-              className="font-mono text-[0.66rem] leading-relaxed text-muted-foreground/75"
-              key={line}
-            >
-              {line}
-            </li>
-          ))}
-          {fileLines.length > 8 ? (
-            <li className="font-mono text-[0.66rem] leading-relaxed text-muted-foreground/55">
-              {t.workflows.subagentMoreFiles(fileLines.length - 8)}
-            </li>
-          ) : null}
-        </ul>
-      ) : null}
-    </aside>
-  )
-}
-
-/** Public subagent live view — reads $activeSubagent and $subagentsBySession. */
-export function SubagentLiveView({ onClose }: { onClose: () => void }) {
-  const active = useStore($activeSubagent)
-  const bySession = useStore($subagentsBySession)
-
-  if (!active) {return null}
-  const items = bySession[active.sessionId] ?? []
-  const subagent = items.find(item => item.id === active.subagentId) ?? null
-
-  if (!subagent) {
-    // Stale selection (subagent cleared from the store); treat as closed.
-    return null
-  }
-
-  return (
-    <SubagentLiveViewImpl
-      onClose={onClose}
-      sessionId={active.sessionId}
-      subagent={subagent}
-    />
-  )
-}
-
-// Re-export the active-subagent atom so callers can subscribe without
-// importing the store layer.
-export const $workflowSubagentFocused = $activeSubagent

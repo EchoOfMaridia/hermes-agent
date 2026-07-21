@@ -1202,7 +1202,16 @@ export const zh: Translations = {
     haltReason: reason => `停止原因: ${reason}`,
     subagentTitle: subagentId => `子代理 ${subagentId}`,
     subagentClose: '关闭',
-    subagentMoreFiles: count => `+${count} 个文件`
+    subagentMoreFiles: count => `+${count} 个文件`,
+    runsTab: '运行',
+    libraryTab: '库',
+    runButton: '运行',
+    titlebarMenuLabel: '工作流',
+    libraryEmptyTitle: '尚未保存工作流',
+    libraryEmptyDesc: '将工作流保存到 ~/.hermes/workflows/ 后将显示在此处。',
+    libraryLoadingTitle: '正在加载工作流…',
+    libraryLoadingDesc: '正在从工作流库中获取。',
+    libraryErrorTitle: '无法加载库'
   },
 
   commandCenter: {

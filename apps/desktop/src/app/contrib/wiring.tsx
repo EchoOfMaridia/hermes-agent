@@ -91,6 +91,10 @@ import { useWindowControlsOverlayWidth } from '../shell/hooks/use-window-control
 import { KeybindPanel } from '../shell/keybind-panel'
 import { titlebarControlsPosition } from '../shell/titlebar'
 import { TitlebarControls } from '../shell/titlebar-controls'
+// Side-effect import: registers the Workflows titlebar dropdown on
+// the left side of the titlebar. Imported after the wiring's own
+// imports so the registry is initialized before our registration fires.
+import '../shell/workflow-titlebar-registration'
 import { UpdatesOverlay } from '../updates-overlay'
 
 import { ContribWiringContext } from './context'

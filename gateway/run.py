@@ -12571,7 +12571,21 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # users see the agent "stop responding without explanation."
             if agent_result.get("already_sent") and not agent_result.get("failed"):
                 if response:
-                    _media_adapter = self._adapter_for_source(source)
+                    # Prefer the in-flight streaming adapter identity when
+                    # ``agent_result`` threads it through. After a fatal-error
+                    # reconnect swaps ``self.adapters[platform]`` to a fresh
+                    # replacement, ``_adapter_for_source`` returns the
+                    # replacement — its ``_client`` is a fresh websocket that
+                    # doesn't share the streamed message's edit history, so
+                    # ``send_multiple_images`` would target the wrong
+                    # transport. The in-flight adapter is the SAME
+                    # ``discord.Client`` the stream consumer edited, so its
+                    # post-stream media bubble lands under the same message
+                    # the user already saw.
+                    _media_adapter = (
+                        agent_result.get("_in_flight_stream_adapter")
+                        or self._adapter_for_source(source)
+                    )
                     if _media_adapter:
                         await self._deliver_media_from_response(
                             response, event, _media_adapter,
@@ -20706,6 +20720,18 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # final answer.  Suppressing delivery here leaves the user staring
         # at silence.  (#10xxx — "agent stops after web search")
         _sc = stream_consumer_holder[0]
+        # Pin the in-flight streaming adapter onto the response so the
+        # caller's post-stream MEDIA: delivery targets the same
+        # ``discord.Client`` instance the stream consumer edited. Without
+        # this pin, a fatal-error reconnect that swaps
+        # ``self.adapters[platform]`` redirects the post-stream image
+        # POST to the freshly installed replacement — its websocket was
+        # never the one the streamed edits rode on, so the deliverable
+        # lands under a totally different message in the user's client.
+        if isinstance(response, dict) and _sc is not None:
+            _in_flight_stream_adapter = getattr(_sc, "adapter", None)
+            if _in_flight_stream_adapter is not None:
+                response["_in_flight_stream_adapter"] = _in_flight_stream_adapter
         if isinstance(response, dict) and not response.get("failed"):
             _final = response.get("final_response") or ""
             _is_empty_sentinel = not _final or _final == "(empty)"

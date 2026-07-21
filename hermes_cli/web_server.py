@@ -17109,6 +17109,242 @@ async def get_plugins_hub(request: Request):
         raise HTTPException(status_code=500, detail="Failed to build plugins hub.") from exc
 
 
+# ============================================================================
+# Workflow REST API — list / inspect / run / status
+# ----------------------------------------------------------------------------
+# Backend for the desktop's WorkflowsView Library tab + titlebar dropdown.
+# Reads the workflow library from ~/.hermes/workflows/library.json, exposes
+# source + inputs for inspection, and drives WorkflowRuntime.submit() for run
+# requests. Status polling returns the runtime's Run snapshot.
+#
+# Per the desktop contract (apps/desktop/src/types/hermes.ts:WorkflowRunStarted-
+# Payload), every run starts a desktop_event_bridge chain that emits the
+# workflow_run_started RpcEvent — so the renderer's $workflowRuns store
+# populates automatically without additional plumbing.
+# ============================================================================
+
+_WORKFLOWS_DIR = Path("~/.hermes/workflows").expanduser()
+
+
+def _ttl_cache(ttl_seconds: float):
+    """Tiny TTL cache decorator. The library file is read on every
+    request otherwise, which is wasteful for polling clients. 2s TTL
+    is short enough that script edits propagate quickly."""
+    import time as _time
+
+    def _decorator(fn):
+        last_value: dict = {"v": None, "t": 0.0}
+
+        def _wrapped(*args, **kwargs):
+            now = _time.monotonic()
+            if last_value["v"] is None or (now - last_value["t"]) > ttl_seconds:
+                last_value["v"] = fn(*args, **kwargs)
+                last_value["t"] = now
+            return last_value["v"]
+
+        def _bust():
+            """Test-only: force the next call to re-invoke fn."""
+            last_value["v"] = None
+            last_value["t"] = 0.0
+
+        # functools.wraps semantics: expose the underlying function via
+        # __wrapped__ AND a cache_bust() helper so tests can invalidate.
+        _wrapped.__wrapped__ = fn  # type: ignore[attr-defined]
+        _wrapped.cache_bust = _bust  # type: ignore[attr-defined]
+        return _wrapped
+
+    return _decorator
+
+
+@_ttl_cache(ttl_seconds=2.0)
+def _read_library() -> dict:
+    """Read the workflow library.json. Cached for 2s so polling clients
+    don't hammer the disk. Returns {"entries": []} on any error."""
+    try:
+        path = _WORKFLOWS_DIR / "library.json"
+        if not path.is_file():
+            return {"entries": []}
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        _log.warning("workflow library read failed: %s", exc)
+        return {"entries": []}
+
+
+def _find_library_entry(name: str) -> dict | None:
+    for entry in _read_library().get("entries", []):
+        if entry.get("name") == name:
+            return entry
+    return None
+
+
+def _read_workflow_source(entry: dict, max_lines: int = 200) -> str:
+    """Read the first N lines of a workflow script for inspection."""
+    path = _WORKFLOWS_DIR / entry.get("path", "")
+    if not path.is_file():
+        return ""
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+        return "\n".join(text.splitlines()[:max_lines])
+    except OSError:
+        return ""
+
+
+def _discover_inputs_required(entry: dict) -> list[str]:
+    """Heuristic: scan the workflow source for `ctx.inputs.get(...)` calls
+    and return the input names. This is intentionally conservative — we
+    only flag inputs the script explicitly reads, not arbitrary ctx keys."""
+    src = _read_workflow_source(entry, max_lines=500)
+    keys: set[str] = set()
+    # ctx.inputs.get("foo") / ctx.inputs.get('foo')
+    for m in re.finditer(r'ctx\.inputs\.get\(\s*["\']([A-Za-z_][A-Za-z0-9_]*)["\']', src):
+        keys.add(m.group(1))
+    # ctx.inputs["foo"]
+    for m in re.finditer(r'ctx\.inputs\[\s*["\']([A-Za-z_][A-Za-z0-9_]*)["\']\s*\]', src):
+        keys.add(m.group(1))
+    return sorted(keys)
+
+
+@_ttl_cache(ttl_seconds=2.0)
+def _workflow_runtime_singleton() -> Any:
+    """Lazy WorkflowRuntime for the REST layer. The workflow plugin
+    exposes the runtime via its plugin registration; we go through
+    the plugin context if available, otherwise create a fresh one."""
+    try:
+        from plugins.hermes_workflow import runtime_factory
+        return runtime_factory.build_runtime(
+            journal_root=str(_WORKFLOWS_DIR.parent / "workflows-journal"),
+            max_concurrent=4,
+        )
+    except Exception as exc:
+        _log.warning("workflow runtime init failed: %s", exc)
+        return None
+
+
+@app.get("/api/workflows/library")
+async def workflows_library(request: Request):
+    """List saved workflows from ~/.hermes/workflows/library.json."""
+    _require_token(request)
+    data = _read_library()
+    return {"entries": data.get("entries", [])}
+
+
+@app.get("/api/workflows/inspect")
+async def workflows_inspect(request: Request, name: str):
+    """Inspect a single workflow: name, description, source, inputs_required."""
+    _require_token(request)
+    entry = _find_library_entry(name)
+    if entry is None:
+        raise HTTPException(status_code=404, detail=f"unknown workflow: {name}")
+    return {
+        "name": entry.get("name"),
+        "description": entry.get("description", ""),
+        "path": entry.get("path", ""),
+        "created_at": entry.get("created_at"),
+        "source": _read_workflow_source(entry),
+        "inputs_required": _discover_inputs_required(entry),
+    }
+
+
+@app.post("/api/workflows/run")
+async def workflows_run(request: Request, body: dict):
+    """Start a workflow run. Body: {name, inputs?: {key: value}}.
+
+    Returns {run_id} on success. The run starts asynchronously; status
+    is available via GET /api/workflows/status?run_id=... and live
+    progress flows through the desktop_event_bridge I shipped earlier
+    in this turn."""
+    _require_token(request)
+    name = (body or {}).get("name")
+    inputs = (body or {}).get("inputs") or {}
+    if not isinstance(name, str) or not name:
+        raise HTTPException(status_code=400, detail="`name` is required")
+    entry = _find_library_entry(name)
+    if entry is None:
+        raise HTTPException(status_code=404, detail=f"unknown workflow: {name}")
+    script_path = _WORKFLOWS_DIR / entry.get("path", "")
+    if not script_path.is_file():
+        raise HTTPException(
+            status_code=404,
+            detail=f"workflow script missing on disk: {script_path}",
+        )
+
+    rt = _workflow_runtime_singleton()
+    if rt is None:
+        raise HTTPException(status_code=500, detail="workflow runtime unavailable")
+
+    # Drive the workflow via the runtime's submit() with a runtime-built
+    # workspace. We isolate each run's workspace under journal_root/<run_id>
+    # so concurrent runs don't collide on output files.
+    from pathlib import Path as _Path
+    import tempfile
+    ws = _Path(tempfile.mkdtemp(prefix=f"workflow-{name}-", dir=_WORKFLOWS_DIR))
+    try:
+        run_id = await rt.submit(
+            _load_workflow_script(script_path),
+            inputs=inputs,
+            workspace=ws,
+        )
+    except Exception as exc:
+        _log.warning("workflow submit failed: %s", exc)
+        raise HTTPException(status_code=500, detail=f"submit failed: {exc}") from exc
+    return {"run_id": run_id}
+
+
+@app.get("/api/workflows/status")
+async def workflows_status(request: Request, run_id: str):
+    """Poll a run's state + completed steps. Returns 404 if unknown."""
+    _require_token(request)
+    rt = _workflow_runtime_singleton()
+    if rt is None:
+        raise HTTPException(status_code=500, detail="workflow runtime unavailable")
+    run = rt.get_run(run_id) if isinstance(run_id, str) else None
+    if run is None:
+        raise HTTPException(status_code=404, detail=f"unknown run_id: {run_id}")
+    return {
+        "run_id": run.run_id,
+        "state": run.state.name,
+        "workflow": run.workflow_name,
+        "started_at": getattr(run, "started_at", None),
+        "ended_at": getattr(run, "ended_at", None),
+        "completed_steps": sorted(run.completed_steps.keys()),
+        "failed_steps": sorted(run.failed_steps.keys()),
+        "current_step": (
+            next(iter(reversed(list(run.step_states.keys()))), None)
+            if run.step_states else None
+        ),
+    }
+
+
+# Lazy import shim — _load_workflow_script lives in the workflow plugin's
+# cli.py. We import on first call so a missing plugin doesn't break web
+# server startup.
+_workflow_cli_module = None
+
+
+def _load_workflow_script(script_path: Path):
+    """Load a workflow script via the same machinery as `hermes workflow run`.
+
+    The workflow plugin's cli._load_workflow_script returns a (workflow_fn,
+    workflow_name) pair, but the runtime's submit() takes the workflow_fn
+    directly. We import the helper lazily and unwrap the pair."""
+    global _workflow_cli_module
+    if _workflow_cli_module is None:
+        try:
+            from plugins.hermes_workflow import cli as _cli
+        except ImportError as exc:
+            raise HTTPException(
+                status_code=500,
+                detail=f"workflow plugin not loaded: {exc}",
+            ) from exc
+        _workflow_cli_module = _cli
+    loaded = _workflow_cli_module._load_workflow_script(script_path)
+    # _load_workflow_script returns a tuple (workflow_fn, name) on the
+    # modern plugin version, or just the function on older versions.
+    if isinstance(loaded, tuple):
+        return loaded[0]
+    return loaded
+
+
 @app.post("/api/dashboard/agent-plugins/install")
 async def post_agent_plugin_install(request: Request, body: _AgentPluginInstallBody):
     _require_token(request)

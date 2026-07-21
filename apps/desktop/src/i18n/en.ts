@@ -1020,7 +1020,16 @@ export const en: Translations = {
     haltReason: reason => `Halted: ${reason}`,
     subagentTitle: subagentId => `Subagent ${subagentId}`,
     subagentClose: 'Close',
-    subagentMoreFiles: count => `+${count} more files`
+    subagentMoreFiles: count => `+${count} more files`,
+    runsTab: 'Runs',
+    libraryTab: 'Library',
+    runButton: 'Run',
+    titlebarMenuLabel: 'Workflows',
+    libraryEmptyTitle: 'No saved workflows yet',
+    libraryEmptyDesc: 'Save a workflow to ~/.hermes/workflows/ then it appears here.',
+    libraryLoadingTitle: 'Loading workflows…',
+    libraryLoadingDesc: 'Fetching from the workflow library.',
+    libraryErrorTitle: 'Could not load library'
   },
 
   commandCenter: {

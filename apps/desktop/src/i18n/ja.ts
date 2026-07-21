@@ -984,7 +984,16 @@ export const ja = defineLocale({
     haltReason: reason => `停止: ${reason}`,
     subagentTitle: subagentId => `サブエージェント ${subagentId}`,
     subagentClose: '閉じる',
-    subagentMoreFiles: count => `+${count} 件のファイル`
+    subagentMoreFiles: count => `+${count} 件のファイル`,
+    runsTab: '実行履歴',
+    libraryTab: 'ライブラリ',
+    runButton: '実行',
+    titlebarMenuLabel: 'ワークフロー',
+    libraryEmptyTitle: '保存されたワークフローはありません',
+    libraryEmptyDesc: 'ワークフローを ~/.hermes/workflows/ に保存すると、ここに表示されます。',
+    libraryLoadingTitle: 'ワークフローを読み込み中…',
+    libraryLoadingDesc: 'ライブラリから取得しています。',
+    libraryErrorTitle: 'ライブラリを読み込めませんでした'
   },
 
   commandCenter: {

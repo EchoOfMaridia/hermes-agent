@@ -22,7 +22,7 @@ import threading
 import time
 from collections import defaultdict
 from contextlib import suppress
-from typing import Callable, Dict, List, Optional, Any, Tuple
+from typing import Callable, Dict, List, Optional, Any, Tuple, Union
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +51,7 @@ _DISCORD_PROMPT_TIMEOUT_DEFAULT = 300
 _DISCORD_PROMPT_TIMEOUT_MIN = 30
 _DISCORD_PROMPT_TIMEOUT_MAX = 900
 _DISCORD_STANDALONE_ERROR_BODY_LIMIT_BYTES = 8 * 1024
+_DISCORD_STANDALONE_JSON_BODY_LIMIT_BYTES = 1 * 1024 * 1024
 
 
 def _read_discord_prompt_timeout() -> int:
@@ -237,6 +238,7 @@ except ImportError:
     commands = None
 
 import sys
+import inspect
 from pathlib import Path as _Path
 sys.path.insert(0, str(_Path(__file__).resolve().parents[3]))
 
@@ -7795,6 +7797,83 @@ def _standalone_sanitize_error(text) -> str:
     )
 
 
+def _standalone_close_response(resp: Any) -> None:
+    close = getattr(resp, "close", None)
+    if callable(close):
+        close()
+        return
+    release = getattr(resp, "release", None)
+    if callable(release):
+        release()
+
+
+async def _standalone_read_response_bytes_limited(
+    resp: Any,
+    limit_bytes: int,
+) -> Tuple[Optional[bytes], bool]:
+    """Read at most *limit_bytes* from an aiohttp-style response body.
+
+    Returns ``(body, truncated)``. Returns ``(None, False)`` when the response
+    object does not expose a streaming ``content.read`` coroutine (e.g. a
+    proxy wrapper or test double) — callers fall back to the object's own
+    ``json()`` / ``text()`` in that case.
+    """
+    content = getattr(resp, "content", None)
+    read = getattr(content, "read", None)
+    if content is None or not inspect.iscoroutinefunction(read):
+        return None, False
+
+    try:
+        chunks: list[bytes] = []
+        total = 0
+        while total <= limit_bytes:
+            chunk = await read(limit_bytes + 1 - total)
+            if not chunk:
+                break
+            if isinstance(chunk, str):
+                chunk = chunk.encode("utf-8", "replace")
+            total += len(chunk)
+            chunks.append(chunk)
+            if total > limit_bytes:
+                _standalone_close_response(resp)
+                return b"".join(chunks)[:limit_bytes], True
+        return b"".join(chunks), False
+    except (TypeError, AttributeError):
+        # Object quacked like a stream but wasn't one — let the caller use
+        # its native json()/text() instead of failing the send.
+        return None, False
+
+
+def _standalone_response_encoding(resp: Any) -> str:
+    get_encoding = getattr(resp, "get_encoding", None)
+    if callable(get_encoding):
+        try:
+            encoding: Any = get_encoding()
+            return str(encoding) if encoding else "utf-8"
+        except Exception:
+            return "utf-8"
+    return "utf-8"
+
+
+async def _standalone_read_text_limited(resp: Any, limit_bytes: int) -> str:
+    body, _truncated = await _standalone_read_response_bytes_limited(resp, limit_bytes)
+    if body is None:
+        return await resp.text()
+    return body.decode(_standalone_response_encoding(resp), "replace")
+
+
+async def _standalone_read_json_limited(resp: Any, limit_bytes: int) -> dict:
+    body, truncated = await _standalone_read_response_bytes_limited(resp, limit_bytes)
+    if body is None:
+        return await resp.json()
+    if truncated:
+        raise ValueError(f"Discord API JSON response exceeds {limit_bytes} bytes")
+    if not body:
+        return {}
+    data = json.loads(body.decode(_standalone_response_encoding(resp), "replace"))
+    return data if isinstance(data, dict) else {}
+
+
 async def _standalone_send(
     pconfig,
     chat_id: str,
@@ -7803,6 +7882,7 @@ async def _standalone_send(
     thread_id: Optional[str] = None,
     media_files: Optional[list] = None,
     force_document: bool = False,
+    caption: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Send via Discord REST API without a live gateway adapter.
 
@@ -7810,6 +7890,15 @@ async def _standalone_send(
     runner is not in this process.  Reads ``DISCORD_BOT_TOKEN`` from
     ``pconfig.token`` (set by the gateway config loader from env) and falls
     back to the ``DISCORD_BOT_TOKEN`` env var.
+
+    ``caption`` rides the media bubble when supplied alongside
+    ``media_files`` (``MEDIA:<path> caption`` from
+    ``hermes send`` / ``send_message`` / cron). Discord permits exactly
+    one message body per multipart upload, so the caption is attached
+    to the first successful media POST via ``payload_json`` and then
+    ``caption_pending`` flips off. If every media file is missing on
+    disk the caption falls back to a plain JSON POST so the user's
+    text is never silently dropped.
 
     Forum channels (type 15) reject ``POST /messages`` — a thread post is
     created automatically via ``POST /channels/{id}/threads``.  Media files
@@ -7900,7 +7989,7 @@ async def _standalone_send(
                             {"id": str(idx), "filename": os.path.basename(path)}
                             for idx, path in enumerate(valid_media)
                         ]
-                        starter_message = {"content": message, "attachments": attachments_meta}
+                        starter_message = {"content": (caption or message), "attachments": attachments_meta}
                         payload_json = json.dumps({"name": thread_name, "message": starter_message})
 
                         form = aiohttp.FormData()
@@ -7958,30 +8047,65 @@ async def _standalone_send(
             if message.strip() or not media_files:
                 async with session.post(url, headers=json_headers, json={"content": message}, **_req_kw) as resp:
                     if resp.status not in {200, 201}:
-                        body = await resp.text()
+                        body = await _standalone_read_text_limited(
+                            resp, _DISCORD_STANDALONE_ERROR_BODY_LIMIT_BYTES,
+                        )
                         return {"error": f"Discord API error ({resp.status}): {body}"}
-                    last_data = await resp.json()
+                    last_data = await _standalone_read_json_limited(
+                        resp, _DISCORD_STANDALONE_JSON_BODY_LIMIT_BYTES,
+                    )
 
-            # Send each media file as a separate multipart upload
+            # Send each media file as a separate multipart upload. When a
+            # MEDIA:<path> caption was supplied, ride it as the message content
+            # on the attachment so it appears under the media bubble instead of
+            # as a separate message. caption_pending tracks whether the caption
+            # still needs delivering, so a missing file falls back to a plain
+            # message rather than silently dropping the text.
+            caption_pending = bool(caption)
             for media_path, _is_voice in media_files:
                 if not os.path.exists(media_path):
                     warning = f"Media file not found, skipping: {media_path}"
                     logger.warning(warning)
                     warnings.append(warning)
+                    if caption_pending:
+                        try:
+                            async with session.post(
+                                url, headers=json_headers,
+                                json={"content": caption}, **_req_kw,
+                            ) as resp:
+                                if resp.status in {200, 201}:
+                                    last_data = await _standalone_read_json_limited(
+                                        resp, _DISCORD_STANDALONE_JSON_BODY_LIMIT_BYTES,
+                                    )
+                                    caption_pending = False
+                        except Exception:
+                            logger.warning("Discord caption-fallback send failed for missing media")
                     continue
                 try:
                     form = aiohttp.FormData()
                     filename = os.path.basename(media_path)
+                    if caption_pending:
+                        form.add_field(
+                            "payload_json",
+                            json.dumps({"content": caption}),
+                            content_type="application/json",
+                        )
+                        caption_pending = False
                     with open(media_path, "rb") as f:
                         form.add_field("files[0]", f, filename=filename)
                         async with session.post(url, headers=auth_headers, data=form, **_req_kw) as resp:
                             if resp.status not in {200, 201}:
-                                body = await resp.text()
+                                body = await _standalone_read_text_limited(
+                                    resp,
+                                    _DISCORD_STANDALONE_ERROR_BODY_LIMIT_BYTES,
+                                )
                                 warning = _standalone_sanitize_error(f"Failed to send media {media_path}: Discord API error ({resp.status}): {body}")
                                 logger.error(warning)
                                 warnings.append(warning)
                                 continue
-                            last_data = await resp.json()
+                            last_data = await _standalone_read_json_limited(
+                                resp, _DISCORD_STANDALONE_JSON_BODY_LIMIT_BYTES,
+                            )
                 except Exception as e:
                     warning = _standalone_sanitize_error(f"Failed to send media {media_path}: {e}")
                     logger.error(warning)

@@ -956,7 +956,16 @@ export const zhHant = defineLocale({
     haltReason: reason => `停止原因: ${reason}`,
     subagentTitle: subagentId => `子代理 ${subagentId}`,
     subagentClose: '關閉',
-    subagentMoreFiles: count => `+${count} 個檔案`
+    subagentMoreFiles: count => `+${count} 個檔案`,
+    runsTab: '執行紀錄',
+    libraryTab: '程式庫',
+    runButton: '執行',
+    titlebarMenuLabel: '工作流程',
+    libraryEmptyTitle: '尚未儲存工作流程',
+    libraryEmptyDesc: '將工作流程儲存至 ~/.hermes/workflows/ 後會顯示於此。',
+    libraryLoadingTitle: '正在載入工作流程…',
+    libraryLoadingDesc: '正在從工作流程程式庫取得。',
+    libraryErrorTitle: '無法載入程式庫'
   },
 
   commandCenter: {

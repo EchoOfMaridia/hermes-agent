@@ -34,6 +34,7 @@ import argparse
 import asyncio
 import contextlib
 import io
+import json
 import logging
 import shlex
 from typing import Any
@@ -168,6 +169,37 @@ def _quote(token: str) -> str:
     return token
 
 
+def _async_string(text: str):
+    """Wrap a static string in an async generator so callers expecting
+    AsyncIterator[str] can consume it uniformly. Used by slash handlers
+    that return a one-shot message (vs. streaming LLM tokens)."""
+    async def _gen():
+        yield text
+    return _gen()
+
+
+def _recent_library_entries(limit: int = 5) -> list[dict]:
+    """Read ~/.hermes/workflows/library.json and return up to `limit`
+    recent entries (sorted by created_at descending). Returns [] on
+    any error so slash feedback never crashes on a missing library."""
+    try:
+        from pathlib import Path as _Path
+        path = _Path("~/.hermes/workflows/library.json").expanduser()
+        if not path.is_file():
+            return []
+        data = json.loads(path.read_text(encoding="utf-8"))
+        entries = data.get("entries", []) or []
+        # Sort by created_at descending if present
+        entries = sorted(
+            entries,
+            key=lambda e: e.get("created_at") or "",
+            reverse=True,
+        )
+        return entries[:limit]
+    except (OSError, json.JSONDecodeError):
+        return []
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -285,7 +317,24 @@ def _create_via_script_author(
     """
     intent = " ".join(rest).strip()
     if not intent:
-        return None  # empty intent — caller falls back to usage string
+        # Empty intent: surface usage + recent library entries so the
+        # user sees something useful instead of silence. The
+        # previous "return None" left /workflow create with no
+        # feedback at all, which the user reported as "basically
+        # useless" (2026-07-19).
+        entries = _recent_library_entries(limit=5)
+        lines = [
+            "create is a v0.2.0 feature requiring the ScriptAuthor integration.",
+            "Save your script to ~/.hermes/workflows/<name>.py then use",
+            "`/workflow run <path>` — or pass a natural-language intent:",
+            "  /workflow create <intent describing the workflow>",
+        ]
+        if entries:
+            lines.append("")
+            lines.append("Recent library entries you could run instead:")
+            for entry in entries:
+                lines.append(f"  - {entry.get('name')}: {entry.get('description', '')[:60]}")
+        return _async_string("\n".join(lines))
 
     if script_author is None:
         # Return a one-shot string via an async generator so the

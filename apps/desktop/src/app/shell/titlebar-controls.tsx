@@ -6,6 +6,11 @@ import { toggleLayoutEditMode } from '@/components/pane-shell/edit-mode'
 import { resetLayoutTree } from '@/components/pane-shell/tree/store'
 import { Button } from '@/components/ui/button'
 import { Codicon } from '@/components/ui/codicon'
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger
+} from '@/components/ui/popover'
 import { Tip } from '@/components/ui/tooltip'
 import { useI18n } from '@/i18n'
 import { triggerHaptic } from '@/lib/haptics'
@@ -32,6 +37,15 @@ export interface TitlebarTool {
   hidden?: boolean
   href?: string
   icon: ReactNode
+  /** Optional popover content rendered when the tool button is clicked.
+   *  Added 2026-07-19 to support the workflows titlebar dropdown (and any
+   *  future titlebar tool that needs a popover rather than a navigation
+   *  toggle). When set, the tool button opens a Popover containing this
+   *  content; the existing onSelect is bypassed (clicking opens the
+   *  popover instead of running the tool's onSelect handler). */
+  popoverContent?: ReactNode
+  /** Optional alignment for the popover. Defaults to "end". */
+  popoverAlign?: 'start' | 'center' | 'end'
   onSelect?: (event?: MouseEvent) => void
   title?: string
   to?: string
@@ -271,6 +285,38 @@ function TitlebarToolButton({ navigate, tool }: { navigate: ReturnType<typeof us
           </a>
         </Button>
       </Tip>
+    )
+  }
+
+  // Popover-equipped tool: clicking the button opens a Popover with
+  // the tool's `popoverContent` rendered inside. Bypasses `onSelect`
+  // because the popover IS the action — no underlying navigation.
+  if (tool.popoverContent) {
+    return (
+      <Popover>
+        <Tip label={tool.title ?? tool.label}>
+          <PopoverTrigger asChild>
+            <Button
+              aria-label={tool.label}
+              className={className}
+              disabled={tool.disabled}
+              onPointerDown={event => event.stopPropagation()}
+              size="icon-titlebar"
+              type="button"
+              variant="ghost"
+            >
+              {tool.icon}
+            </Button>
+          </PopoverTrigger>
+        </Tip>
+        <PopoverContent
+          align={tool.popoverAlign ?? 'end'}
+          className="w-80 p-0"
+          sideOffset={6}
+        >
+          {tool.popoverContent}
+        </PopoverContent>
+      </Popover>
     )
   }
 
