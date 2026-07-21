@@ -112,6 +112,10 @@ class TurnContext:
     should_review_memory: bool = False
     # Context contributed by ``pre_llm_call`` plugins (appended to user message).
     plugin_user_context: str = ""
+    # Context from ``post_context_compact`` plugin hooks (re-anchoring after
+    # compression loss). Prepended to user message on the turn immediately after
+    # a compaction event. Ephemeral — never persisted to session DB.
+    post_compact_context: str = ""
     # External-memory prefetch result, reused across loop iterations.
     ext_prefetch_cache: str = ""
 
@@ -133,6 +137,7 @@ def build_turn_context(
     set_session_context,
     set_current_write_origin,
     ra,
+    post_compact_context: Optional[str] = None,
 ) -> TurnContext:
     """Run the once-per-turn setup and return the loop's input context.
 
@@ -633,6 +638,11 @@ def build_turn_context(
         except Exception:
             pass
 
+    # post_context_compact hook context: re-anchor after compression loss.
+    # Prepended to the user message alongside pre_llm_call context.
+    # Default empty string; non-empty value is injected in conversation_loop.
+    _post_cc: str = post_compact_context or ""
+
     return TurnContext(
         user_message=user_message,
         original_user_message=original_user_message,
@@ -644,5 +654,6 @@ def build_turn_context(
         current_turn_user_idx=current_turn_user_idx,
         should_review_memory=should_review_memory,
         plugin_user_context=plugin_user_context,
+        post_compact_context=_post_cc,
         ext_prefetch_cache=ext_prefetch_cache,
     )

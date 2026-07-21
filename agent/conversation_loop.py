@@ -654,6 +654,7 @@ def run_conversation(
         set_session_context=set_session_context,
         set_current_write_origin=set_current_write_origin,
         ra=_ra,
+        post_compact_context=_post_compact_context,
     )
     user_message = _ctx.user_message
     original_user_message = _ctx.original_user_message
@@ -677,6 +678,9 @@ def run_conversation(
     truncated_tool_call_retries = 0
     truncated_response_parts: List[str] = []
     compression_attempts = 0
+    # Injected once per compaction event by post_context_compact hooks; nulled
+    # after the first LLM turn so it does not re-fire on subsequent turns.
+    _post_compact_context: Optional[str] = None
     _turn_exit_reason = "unknown"  # Diagnostic: why the loop ended
     # Last composed answer intentionally held back by a verification gate. If
     # that continuation consumes the remaining budget, this is the best
@@ -876,6 +880,18 @@ def run_conversation(
                     if isinstance(_base, str):
                         api_msg["content"] = _base + "\n\n" + "\n\n".join(_injections)
 
+            # post_context_compact context: re-anchor after compression loss.
+            # Fires once per compaction event; cleared immediately after so
+            # subsequent turns in the same session do not see it again.
+            if _post_compact_context:
+                _base = api_msg.get("content", "")
+                api_msg["content"] = (
+                    (_base + "\n\n" + _post_compact_context)
+                    if _base
+                    else _post_compact_context
+                )
+                _post_compact_context = None
+
             # For ALL assistant messages, pass reasoning back to the API
             # This ensures multi-turn reasoning context is preserved
             agent._copy_reasoning_content_for_api(msg, api_msg)
@@ -1006,21 +1022,23 @@ def run_conversation(
         # (default 5). Set to 0 to opt out.
         # See .hermes/plans/tpipe-vs-hermes-compliance-report-2026-07-20.md X2.
         try:
-            _rem_every_n = 5
+            _rem_every_n = 15
             try:
                 _cfg = getattr(agent, "_config", None)
                 if isinstance(_cfg, dict):
                     _agent_cfg = _cfg.get("agent") or {}
-                    _rem_v = _agent_cfg.get("operator_directive_reminder_every_n_calls", 5)
+                    _rem_v = _agent_cfg.get("operator_directive_reminder_every_n_calls", 15)
                     if isinstance(_rem_v, int):
                         _rem_every_n = _rem_v
             except Exception:
                 pass
             # Per-call counter lives on the agent instance; survives retries
             # within run_conversation but resets across sessions naturally.
+            # Initialized to 1 so first call (after increment) fires at turn 1,
+            # then every _rem_every_n calls (turns 1, N+1, 2N+1, ...).
             _rem_counter = getattr(agent, "_operator_directive_reminder_counter", None)
             if not isinstance(_rem_counter, int):
-                _rem_counter = 0
+                _rem_counter = 1
             _rem_counter += 1
             setattr(agent, "_operator_directive_reminder_counter", _rem_counter)
             api_messages = _maybe_inject_operator_reminder(
@@ -1146,12 +1164,14 @@ def run_conversation(
                 f"📦 Pre-API compression: ~{request_pressure_tokens:,} tokens "
                 f"near the context/output limit. Compacting before the next model call."
             )
-            messages, active_system_prompt = agent._compress_context(
+            messages, active_system_prompt, _post_compact_context = agent._compress_context(
                 messages,
                 system_message,
                 approx_tokens=request_pressure_tokens,
                 task_id=effective_task_id,
             )
+            # _post_compact_context is injected into the next user message below
+            # via _build_turn_context / _ctx.post_compact_context
             # Reset retry/empty-response state so the compacted request
             # gets a fresh chance instead of inheriting stale recovery
             # counters from the pre-compaction history.

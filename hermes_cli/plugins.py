@@ -153,6 +153,15 @@ VALID_HOOKS: Set[str] = {
     # finish. Hermes' shipped guidance lives in the evidence-based
     # verification-stop nudge; this hook is for user/plugin policy and is
     # bounded by agent.max_verify_nudges.
+    # post_context_compact: fired once by compress_context() after the
+    # compressed transcript is ready and the system prompt is rebuilt, just
+    # before the compressed result is returned. Plugins return context to
+    # re-anchor the LLM after compression loss (todo list, loaded skill
+    # rules, plan-file progress). Context is injected into the next user
+    # message and is NOT persisted to the session DB. Fail-open.
+    # Kwargs: session_id, boundary_parent, compressed_messages, system_prompt,
+    #          compression_count, in_place, platform, model
+    "post_context_compact",
     "pre_verify",
     "pre_api_request",
     "post_api_request",

@@ -465,8 +465,14 @@ def compress_context(
     task_id: str = "default",
     focus_topic: Optional[str] = None,
     force: bool = False,
-) -> Tuple[list, str]:
+) -> Tuple[list, str, Optional[str]]:
     """Compress conversation context and split the session in SQLite.
+
+    Returns:
+        ``(compressed_messages, new_system_prompt, post_compact_context)`` tuple.
+        ``post_compact_context`` is a string returned by ``post_context_compact``
+        plugin hooks, or ``None``. When non-``None``, the caller injects this
+        as an ephemeral re-anchoring message into the next user turn.
 
     Args:
         agent: The owning :class:`AIAgent`.
@@ -517,7 +523,7 @@ def compress_context(
             existing_prompt = getattr(agent, "_cached_system_prompt", None)
             if not existing_prompt:
                 existing_prompt = agent._build_system_prompt(system_message)
-            return messages, existing_prompt
+            return messages, existing_prompt, None
 
     # Lazy feasibility check — run the auxiliary-provider probe + context
     # length lookup just-in-time on the first compression attempt instead of
@@ -690,7 +696,7 @@ def compress_context(
             _existing_sp = getattr(agent, "_cached_system_prompt", None)
             if not _existing_sp:
                 _existing_sp = agent._build_system_prompt(system_message)
-            return messages, _existing_sp
+            return messages, _existing_sp, None
         if _lock_holder is not None:
             _lock_refresher = _CompressionLockLeaseRefresher(
                 _lock_db,
@@ -762,7 +768,7 @@ def compress_context(
             _existing_sp = getattr(agent, "_cached_system_prompt", None)
             if not _existing_sp:
                 _existing_sp = agent._build_system_prompt(system_message)
-            return messages, _existing_sp
+            return messages, _existing_sp, None
         finally:
             _release_lock()
 
@@ -1095,12 +1101,58 @@ def compress_context(
         except Exception:
             pass
 
+        # ── post_context_compact plugin hook ──────────────────────────────────
+        # Fire once per compaction event. Plugins return context to re-anchor
+        # the LLM after compression loss (todo list, loaded skill rules, plan
+        # file progress, system prompt reminders). Context is consumed by the
+        # caller (run_conversation) as an ephemeral re-anchoring message in the
+        # next user turn — NOT persisted to the session DB.
+        # Fail-open: plugin errors are caught so compression itself cannot break.
+        _post_compact_context: Optional[str] = None
+        try:
+            from hermes_cli.plugins import has_hook, invoke_hook as _invoke_hook
+
+            if has_hook("post_context_compact"):
+                _results = _invoke_hook(
+                    "post_context_compact",
+                    session_id=agent.session_id or "",
+                    boundary_parent=_boundary_parent or "",
+                    compressed_messages=compressed,
+                    system_prompt=new_system_prompt or "",
+                    compression_count=agent.context_compressor.compression_count,
+                    in_place=in_place,
+                    platform=getattr(agent, "platform", None) or "cli",
+                    model=getattr(agent, "model", None) or "",
+                )
+                if _results:
+                    for _r in _results:
+                        _raw: Optional[str] = None
+                        if isinstance(_r, str) and _r.strip():
+                            _raw = _r.strip()
+                        elif isinstance(_r, dict):
+                            _raw = _r.get("context", "") or ""
+                            if not isinstance(_raw, str):
+                                _raw = None
+                        if _raw:
+                            # Per-plugin bound: truncate at 2000 chars to prevent
+                            # a misbehaving plugin from bloating the context.
+                            _max_chars = getattr(agent, "_post_compact_max_chars", 2000)
+                            if len(_raw) > _max_chars:
+                                _raw = (
+                                    _raw[:_max_chars]
+                                    + f"\n\n[post_context_compact hook: truncated {len(_raw) - _max_chars} chars]"
+                                )
+                            _post_compact_context = _raw
+                            break  # first plugin wins
+        except Exception:
+            pass  # fail-open
+
         logger.info(
             "context compression done: session=%s messages=%d->%d rough_tokens=~%s awaiting_real_usage=true",
             agent.session_id or "none", _pre_msg_count, len(compressed),
             f"{_compressed_est:,}",
         )
-        return compressed, new_system_prompt
+        return compressed, new_system_prompt, _post_compact_context
     finally:
         # Release the lock on the OLD session_id only AFTER rotation completed
         # and all post-rotation bookkeeping (memory manager, context engine,
@@ -1118,7 +1170,7 @@ def _compress_context_via_codex_app_server(
     approx_tokens: Optional[int] = None,
     task_id: str = "default",
     force: bool = False,
-) -> Tuple[list, str]:
+) -> Tuple[list, str, Optional[str]]:
     """Route compaction to Codex app-server for Codex-owned threads.
 
     Hermes' normal compressor rewrites the local OpenAI-style transcript.
@@ -1143,7 +1195,7 @@ def _compress_context_via_codex_app_server(
         existing_prompt = getattr(agent, "_cached_system_prompt", None)
         if not existing_prompt:
             existing_prompt = agent._build_system_prompt(system_message)
-        return messages, existing_prompt
+        return messages, existing_prompt, None
 
     codex_session = getattr(agent, "_codex_session", None)
     if codex_session is None:
@@ -1157,7 +1209,7 @@ def _compress_context_via_codex_app_server(
         existing_prompt = getattr(agent, "_cached_system_prompt", None)
         if not existing_prompt:
             existing_prompt = agent._build_system_prompt(system_message)
-        return messages, existing_prompt
+        return messages, existing_prompt, None
 
     logger.info(
         "codex app-server compaction started: session=%s messages=%d tokens=~%s",
@@ -1188,7 +1240,7 @@ def _compress_context_via_codex_app_server(
         existing_prompt = getattr(agent, "_cached_system_prompt", None)
         if not existing_prompt:
             existing_prompt = agent._build_system_prompt(system_message)
-        return messages, existing_prompt
+        return messages, existing_prompt, None
 
     try:
         from agent.codex_runtime import (
@@ -1227,7 +1279,7 @@ def _compress_context_via_codex_app_server(
     existing_prompt = getattr(agent, "_cached_system_prompt", None)
     if not existing_prompt:
         existing_prompt = agent._build_system_prompt(system_message)
-    return messages, existing_prompt
+    return messages, existing_prompt, None
 
 
 def try_shrink_image_parts_in_messages(
