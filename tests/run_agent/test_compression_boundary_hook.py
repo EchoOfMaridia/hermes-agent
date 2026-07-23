@@ -157,7 +157,7 @@ class TestCompressionBoundaryHook:
             original_sid = agent.session_id
 
             # Must not raise
-            compressed, _prompt = agent._compress_context(
+            compressed, _prompt, _ = agent._compress_context(
                 [{"role": "user", "content": "m"}], "sys", approx_tokens=100
             )
             assert compressed
@@ -231,7 +231,7 @@ class TestSessionCompressEvent:
             db = SessionDB(db_path=Path(tmpdir) / "test.db")
             agent = self._make_agent(db, event_callback=None)
             agent.context_compressor = self._stub_compressor()
-            compressed, _ = agent._compress_context(
+            compressed, _, _ = agent._compress_context(
                 [{"role": "user", "content": "m"}], "sys", approx_tokens=100
             )
             assert compressed
@@ -248,8 +248,136 @@ class TestSessionCompressEvent:
             original_sid = agent.session_id
             agent.context_compressor = self._stub_compressor()
 
-            compressed, _ = agent._compress_context(
+            compressed, _, _ = agent._compress_context(
                 [{"role": "user", "content": "m"}], "sys", approx_tokens=100
             )
             assert compressed
             assert agent.session_id != original_sid
+
+
+class TestCompressContextTupleContract:
+    """compress_context() / _compress_context() must always return 3-tuples.
+
+    The contract is ``(compressed_messages, new_system_prompt,
+    post_compact_context)``. Every production call site unpacks 3 names.
+    If ANY return path yields a 2-tuple, the unpacking raises
+    ``ValueError: too many values to unpack (expected 2)`` and the
+    agent loop dies mid-compression. This is the crash the operator
+    hit on ``/compress`` over a 299k-token session on 2026-07-22.
+
+    These tests pin the contract across all reachable return paths,
+    not just the happy path.
+    """
+
+    def _make_agent(self):
+        from run_agent import AIAgent
+        with patch.dict(os.environ, {"OPENROUTER_API_KEY": "test-key"}):
+            return AIAgent(
+                api_key="test-key",
+                base_url="https://openrouter.ai/api/v1",
+                model="test/model",
+                quiet_mode=True,
+                session_db=None,
+                session_id="test-session",
+                skip_context_files=True,
+                skip_memory=True,
+            )
+
+    def test_success_path_returns_3_tuple(self):
+        """Happy path returns ``(messages, system_prompt, post_compact_context)``."""
+        agent = self._make_agent()
+        agent.compression_in_place = False
+
+        compressor = MagicMock()
+        compressor.compress.return_value = [{"role": "user", "content": "summary"}]
+        compressor.compression_count = 1
+        compressor.last_prompt_tokens = 0
+        compressor.last_completion_tokens = 0
+        compressor._last_summary_error = None
+        compressor._last_compress_aborted = False
+        compressor._last_compression_made_progress = True
+        compressor._last_summary_fallback_used = False
+        agent.context_compressor = compressor
+
+        result = agent._compress_context(
+            [{"role": "user", "content": "m"}], "sys", approx_tokens=100
+        )
+        assert len(result) == 3, (
+            f"compress_context must return 3-tuple, got {len(result)}-tuple: "
+            f"{result!r}"
+        )
+        messages, system_prompt, post_compact_context = result
+        assert messages == [{"role": "user", "content": "summary"}]
+        assert post_compact_context is None
+
+    def test_no_progress_path_returns_3_tuple(self):
+        """When the compressor returns the input unchanged (no structural
+        progress), the function still returns a 3-tuple. This is the
+        crash site — the regression that breaks /compress."""
+        agent = self._make_agent()
+        agent.compression_in_place = False
+
+        messages = [{"role": "user", "content": "m"}]
+        compressor = MagicMock()
+        # Identity-return: compressor makes no structural progress.
+        compressor.compress.return_value = messages
+        compressor.compression_count = 1
+        compressor.last_prompt_tokens = 0
+        compressor.last_completion_tokens = 0
+        compressor._last_summary_error = None
+        compressor._last_compress_aborted = False
+        compressor._last_compression_made_progress = False
+        compressor._last_summary_fallback_used = False
+        agent.context_compressor = compressor
+
+        result = agent._compress_context(messages, "sys", approx_tokens=100)
+        assert len(result) == 3, (
+            f"no-progress path returned {len(result)}-tuple instead of 3-tuple: "
+            f"{result!r}"
+        )
+        assert result[0] is messages
+        assert result[2] is None
+
+    def test_abort_path_returns_3_tuple(self):
+        """When the compressor sets _last_compress_aborted, returns 3-tuple
+        with original messages and the cached system prompt."""
+        agent = self._make_agent()
+        agent.compression_in_place = False
+
+        messages = [{"role": "user", "content": "m"}]
+        compressor = MagicMock()
+        compressor.compress.return_value = [{"role": "user", "content": "x"}]
+        compressor.compression_count = 1
+        compressor.last_prompt_tokens = 0
+        compressor.last_completion_tokens = 0
+        compressor._last_summary_error = "boom"
+        compressor._last_compress_aborted = True
+        compressor._last_compression_made_progress = False
+        compressor._last_summary_fallback_used = False
+        agent.context_compressor = compressor
+
+        result = agent._compress_context(messages, "sys", approx_tokens=100)
+        assert len(result) == 3, (
+            f"abort path returned {len(result)}-tuple instead of 3-tuple: "
+            f"{result!r}"
+        )
+
+    def test_preflight_cooldown_returns_3_tuple(self):
+        """The preflight cooldown short-circuit must also return a 3-tuple."""
+        from agent.context_compressor import ContextCompressor
+
+        agent = self._make_agent()
+        agent.compression_in_place = False
+
+        original = ContextCompressor._automatic_compression_blocked
+        ContextCompressor._automatic_compression_blocked = lambda self: True
+        try:
+            result = agent._compress_context(
+                [{"role": "user", "content": "m"}], "sys", approx_tokens=100
+            )
+            assert len(result) == 3, (
+                f"cooldown path returned {len(result)}-tuple: {result!r}"
+            )
+            assert result[2] is None
+        finally:
+            ContextCompressor._automatic_compression_blocked = original

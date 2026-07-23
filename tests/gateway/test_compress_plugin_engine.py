@@ -126,7 +126,7 @@ async def test_compress_works_with_plugin_context_engine():
     # Real plugin engine — no MagicMock auto-attributes masking missing helpers.
     agent_instance.context_compressor = plugin_engine
     agent_instance.session_id = "sess-1"
-    agent_instance._compress_context.return_value = (compressed, "")
+    agent_instance._compress_context.return_value = (compressed, "", None)
 
     with (
         patch("gateway.run._resolve_runtime_agent_kwargs", return_value={"api_key": "***"}),

@@ -26,10 +26,13 @@ def build_test_shell(agent_response=None, agent_sentinel=None):
     Parameters
     ----------
     agent_response : tuple | None
-        ``(compressed_messages, new_system_prompt)`` that
-        ``agent._compress_context`` should return. Defaults to a
-        single ``"[summary]"`` summary message and an empty new system
-        prompt.
+        ``(compressed_messages, new_system_prompt, post_compact_context)``
+        that ``agent._compress_context`` should return. The third element
+        is the post-context-compact hook's re-anchoring string for the
+        next user turn; tests that don't care about hook re-anchoring can
+        leave it as ``None``. Defaults to a single ``"[summary]"``
+        summary message, an empty new system prompt, and ``None`` for
+        post_compact_context.
     agent_sentinel : object | None
         If not ``None``, returned as ``agent.session_id`` so that
         session-id sync behaviour in ``_manual_compress`` is
@@ -51,6 +54,7 @@ def build_test_shell(agent_response=None, agent_sentinel=None):
         agent_response = (
             [{"role": "user", "content": "[summary]"}],
             "",
+            None,
         )
 
     cli = HermesCLI.__new__(HermesCLI)

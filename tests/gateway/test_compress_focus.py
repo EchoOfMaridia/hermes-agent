@@ -67,7 +67,7 @@ async def test_compress_focus_topic_passed_to_agent():
     agent_instance = MagicMock()
     agent_instance.context_compressor.has_content_to_compress.return_value = True
     agent_instance.session_id = "sess-1"
-    agent_instance._compress_context.return_value = (compressed, "")
+    agent_instance._compress_context.return_value = (compressed, "", None)
 
     def _estimate(messages):
         return 100
@@ -97,7 +97,7 @@ async def test_compress_no_focus_passes_none():
     agent_instance = MagicMock()
     agent_instance.context_compressor.has_content_to_compress.return_value = True
     agent_instance.session_id = "sess-1"
-    agent_instance._compress_context.return_value = (list(history), "")
+    agent_instance._compress_context.return_value = (list(history), "", None)
 
     with (
         patch("gateway.run._resolve_runtime_agent_kwargs", return_value={"api_key": "***"}),

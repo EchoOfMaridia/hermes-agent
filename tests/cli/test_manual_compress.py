@@ -28,7 +28,7 @@ def _make_history() -> list[dict[str, str]]:
 
 def test_manual_compress_reports_noop_without_success_banner(monkeypatch):
     history = _make_history()
-    cli, _ = build_test_shell(agent_response=(list(history), ""))
+    cli, _ = build_test_shell(agent_response=(list(history), "", None))
     cli.conversation_history = history
     # Same-identity session_id — skip the post-compress sync branch.
     cli.agent.session_id = cli.session_id
@@ -52,7 +52,7 @@ def test_manual_compress_reports_noop_without_success_banner(monkeypatch):
 
 def test_manual_compress_reports_aborted_summary_without_success_banner(monkeypatch):
     history = _make_history()
-    cli, agent = build_test_shell(agent_response=(list(history), ""))
+    cli, agent = build_test_shell(agent_response=(list(history), "", None))
     cli.conversation_history = history
     cli.agent.session_id = cli.session_id
     agent.context_compressor._last_compress_aborted = True
@@ -81,7 +81,7 @@ def test_manual_compress_explains_when_token_estimate_rises(monkeypatch):
         {"role": "assistant", "content": "Dense summary that still counts as more tokens."},
         history[-1],
     ]
-    cli, _ = build_test_shell(agent_response=(compressed, ""))
+    cli, _ = build_test_shell(agent_response=(compressed, "", None))
     cli.conversation_history = history
     cli.agent.session_id = cli.session_id
 
@@ -125,7 +125,7 @@ def test_manual_compress_syncs_session_id_after_split():
     # Simulate _compress_context mutating agent.session_id as a side effect.
     def _fake_compress(*args, **kwargs):
         agent.session_id = new_child_id
-        return (compressed, "")
+        return (compressed, "", None)
     agent._compress_context.side_effect = _fake_compress
     agent.session_id = old_id  # starts in sync
     cli._pending_title = "stale title"
@@ -163,7 +163,7 @@ def test_manual_compress_flushes_compressed_history_to_child_session_db():
 
     def _fake_compress(*args, **kwargs):
         agent.session_id = new_child_id
-        return (compressed, "")
+        return (compressed, "", None)
 
     agent._compress_context.side_effect = _fake_compress
 
@@ -174,7 +174,7 @@ def test_manual_compress_flushes_compressed_history_to_child_session_db():
 
 
 def test_manual_compress_does_not_flush_full_history_when_session_id_unchanged():
-    cli, agent = build_test_shell(agent_response=(_make_history(), ""))
+    cli, agent = build_test_shell(agent_response=(_make_history(), "", None))
     history = _make_history()
     cli.conversation_history = history
     agent.session_id = cli.session_id
@@ -189,7 +189,7 @@ def test_manual_compress_no_sync_when_session_id_unchanged():
     """If compression is a no-op (agent.session_id didn't change), the CLI
     must NOT clear _pending_title or otherwise disturb session state.
     """
-    cli, _ = build_test_shell(agent_response=(_make_history(), ""))
+    cli, _ = build_test_shell(agent_response=(_make_history(), "", None))
     history = _make_history()
     cli.conversation_history = history
     cli.agent.session_id = cli.session_id

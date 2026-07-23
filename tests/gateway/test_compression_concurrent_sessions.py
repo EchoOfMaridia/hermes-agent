@@ -179,7 +179,7 @@ def test_concurrent_compressions_same_session_serialize(tmp_path: Path) -> None:
 
     def run(key, agent):
         try:
-            compressed, _sp = agent._compress_context(_MESSAGES, "sys", approx_tokens=120_000)
+            compressed, _sp, _ = agent._compress_context(_MESSAGES, "sys", approx_tokens=120_000)
             results[key] = compressed
         except Exception as exc:
             errors.append(exc)

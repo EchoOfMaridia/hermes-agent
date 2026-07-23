@@ -1943,7 +1943,7 @@ class HermesACPAgent(acp.Agent):
                 # ACP sessions must keep a stable session id, so avoid the
                 # SQLite session-splitting side effect inside _compress_context.
                 agent._session_db = None
-                compressed, _ = agent._compress_context(
+                compressed, _, _ = agent._compress_context(
                     state.history,
                     getattr(agent, "_cached_system_prompt", "") or "",
                     approx_tokens=approx_tokens,

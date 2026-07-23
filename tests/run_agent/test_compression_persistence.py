@@ -222,7 +222,7 @@ class TestFlushAfterCompression:
             ]
 
             with patch("agent.context_compressor.call_llm", side_effect=RuntimeError("no provider")):
-                compressed, _ = compress_context(
+                compressed, _, _ = compress_context(
                     agent, messages, approx_tokens=100_000, system_message="sys"
                 )
 

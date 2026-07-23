@@ -3261,7 +3261,7 @@ class GatewaySlashCommandsMixin:
                     return t("gateway.compress.nothing_to_do")
 
                 loop = asyncio.get_running_loop()
-                compressed, _ = await loop.run_in_executor(
+                compressed, _, _ = await loop.run_in_executor(
                     None,
                     lambda: tmp_agent._compress_context(head, "", approx_tokens=approx_tokens, focus_topic=focus_topic, force=True)
                 )

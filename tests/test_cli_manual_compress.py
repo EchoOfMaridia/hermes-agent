@@ -20,7 +20,7 @@ class DummyAgent:
                 "force": force,
             }
         )
-        return ([{"role": "user", "content": "[CONTEXT SUMMARY]: compacted"}], "new system prompt")
+        return ([{"role": "user", "content": "[CONTEXT SUMMARY]: compacted"}], "new system prompt", None)
 
 
 def test_manual_compress_does_not_pass_cached_system_prompt(monkeypatch):

@@ -635,6 +635,14 @@ def run_conversation(
     # message sanitization, todo/nudge hydration, system-prompt restore-or-
     # build, crash-resilience persistence, preflight compression, the
     # ``pre_llm_call`` plugin hook, and external-memory prefetch — lives in
+    # Declared BEFORE build_turn_context below reads it as a kwarg; without
+    # this, Python's `local-name` rule (any later assignment makes the name
+    # local for the whole function) raises UnboundLocalError on the first read.
+    # Populated later by `agent._compress_context(...)` on compaction events
+    # (line ~1170). Ephemeral — nulled after the first LLM turn so it does not
+    # re-fire on subsequent turns.
+    _post_compact_context: Optional[str] = None
+
     # ``build_turn_context``.  It mutates ``agent`` exactly as the inline code
     # did and returns the locals the loop below reads back.  See
     # ``agent/turn_context.py``.
@@ -678,9 +686,6 @@ def run_conversation(
     truncated_tool_call_retries = 0
     truncated_response_parts: List[str] = []
     compression_attempts = 0
-    # Injected once per compaction event by post_context_compact hooks; nulled
-    # after the first LLM turn so it does not re-fire on subsequent turns.
-    _post_compact_context: Optional[str] = None
     _turn_exit_reason = "unknown"  # Diagnostic: why the loop ended
     # Last composed answer intentionally held back by a verification gate. If
     # that continuation consumes the remaining budget, this is the best
@@ -3316,7 +3321,7 @@ def run_conversation(
                     compression_attempts += 1
                     if compression_attempts <= max_compression_attempts:
                         original_len = len(messages)
-                        messages, active_system_prompt = agent._compress_context(
+                        messages, active_system_prompt, _post_compact_context = agent._compress_context(
                             messages, system_message,
                             approx_tokens=approx_tokens,
                             task_id=effective_task_id,
@@ -3571,7 +3576,7 @@ def run_conversation(
 
                     original_len = len(messages)
                     original_tokens = estimate_messages_tokens_rough(messages)
-                    messages, active_system_prompt = agent._compress_context(
+                    messages, active_system_prompt, _post_compact_context = agent._compress_context(
                         messages, system_message, approx_tokens=approx_tokens,
                         task_id=effective_task_id,
                     )
@@ -3812,7 +3817,7 @@ def run_conversation(
 
                     original_len = len(messages)
                     original_tokens = estimate_messages_tokens_rough(messages)
-                    messages, active_system_prompt = agent._compress_context(
+                    messages, active_system_prompt, _post_compact_context = agent._compress_context(
                         messages, system_message, approx_tokens=approx_tokens,
                         task_id=effective_task_id,
                     )
@@ -5059,7 +5064,7 @@ def run_conversation(
 
                 if agent.compression_enabled and _compressor.should_compress(_real_tokens):
                     agent._safe_print("  ⟳ compacting context…")
-                    messages, active_system_prompt = agent._compress_context(
+                    messages, active_system_prompt, _post_compact_context = agent._compress_context(
                         messages, system_message,
                         approx_tokens=agent.context_compressor.last_prompt_tokens,
                         task_id=effective_task_id,

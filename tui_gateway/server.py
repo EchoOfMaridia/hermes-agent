@@ -3149,7 +3149,7 @@ def _compress_session_history(
     # cached prompt (which already contains the agent identity block)
     # makes the rebuild append the identity a second time. Mirrors the
     # CLI's _manual_compress fix for issue #15281.
-    compressed, _ = agent._compress_context(
+    compressed, _, _ = agent._compress_context(
         history,
         None,
         approx_tokens=approx_tokens,

@@ -33,7 +33,7 @@ def test_compress_here_compresses_head_only(monkeypatch):
     """/compress here 2 passes only the head to _compress_context."""
     history = _make_history()
     summary = [{"role": "user", "content": "[summary of earlier turns]"}]
-    cli, _ = build_test_shell(agent_response=(summary, ""))
+    cli, _ = build_test_shell(agent_response=(summary, "", None))
     cli.conversation_history = history
 
     with patch("agent.model_metadata.estimate_request_tokens_rough",
@@ -52,7 +52,7 @@ def test_compress_here_reappends_verbatim_tail(monkeypatch):
     """The most recent exchanges are preserved verbatim after the summary."""
     history = _make_history()
     summary = [{"role": "assistant", "content": "[summary]"}]
-    cli, _ = build_test_shell(agent_response=(summary, ""))
+    cli, _ = build_test_shell(agent_response=(summary, "", None))
     cli.conversation_history = history
 
     with patch("agent.model_metadata.estimate_request_tokens_rough",
@@ -71,7 +71,7 @@ def test_compress_here_reappends_verbatim_tail(monkeypatch):
 
 def test_compress_here_banner_mentions_summarizing_up_to_here(monkeypatch):
     cli, _ = build_test_shell(
-        agent_response=([{"role": "user", "content": "[summary]"}], ""),
+        agent_response=([{"role": "user", "content": "[summary]"}], "", None),
     )
     cli.conversation_history = _make_history()
 
@@ -90,7 +90,7 @@ def test_compress_here_banner_mentions_summarizing_up_to_here(monkeypatch):
 def test_bare_compress_still_full(monkeypatch):
     """/compress with no args compresses the whole history (full mode)."""
     history = _make_history()
-    cli, _ = build_test_shell(agent_response=(list(history), ""))
+    cli, _ = build_test_shell(agent_response=(list(history), "", None))
     cli.conversation_history = history
 
     with patch("agent.model_metadata.estimate_request_tokens_rough",
@@ -105,7 +105,7 @@ def test_bare_compress_still_full(monkeypatch):
 def test_focus_still_works(monkeypatch):
     """/compress <focus> keeps the existing focus behavior."""
     history = _make_history()
-    cli, _ = build_test_shell(agent_response=(list(history), ""))
+    cli, _ = build_test_shell(agent_response=(list(history), "", None))
     cli.conversation_history = history
 
     with patch("agent.model_metadata.estimate_request_tokens_rough",

@@ -494,6 +494,12 @@ def compress_context(
         returns the original messages unchanged and the existing system
         prompt — the session is NOT rotated.  Callers should detect the
         no-op via ``len(returned) == len(input)`` and stop the retry loop.
+
+        NOTE: this block documents the *abort-path* return shape only.
+        The function as a whole returns the 3-tuple documented above
+        (``(compressed_messages, new_system_prompt, post_compact_context)``)
+        on every reachable path, including this abort path — the third
+        element is ``None`` here because no boundary was crossed.
     """
     # Codex app-server sessions: the codex agent owns the real thread context;
     # Hermes' summarizer would only rewrite a local mirror without shrinking
@@ -775,6 +781,12 @@ def compress_context(
     # A compressor that returns the exact input object made no structural
     # progress. Do not rotate/rewrite the session or arm post-compression
     # deferral in that case; its own anti-thrash counter records the no-op.
+    # NOTE: must return a 3-tuple (messages, system_prompt, post_compact_context).
+    # Every production caller in run_agent.py / conversation_loop.py /
+    # turn_context.py / cli.py / tui_gateway/server.py / acp_adapter/server.py /
+    # gateway/{run,slash_commands}.py unpacks 3 names. A 2-tuple here crashes
+    # the loop with ``ValueError: too many values to unpack (expected 2)``
+    # mid-compression — see the 299k-token /compress crash on 2026-07-22.
     if compressed is messages:
         logger.info(
             "Compression made no progress (session=%s) — skipping boundary rewrite.",
@@ -784,7 +796,7 @@ def compress_context(
         if not _existing_sp:
             _existing_sp = agent._build_system_prompt(system_message)
         _release_lock()
-        return messages, _existing_sp
+        return messages, _existing_sp, None
 
     try:
         summary_error = getattr(agent.context_compressor, "_last_summary_error", None)

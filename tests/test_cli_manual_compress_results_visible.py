@@ -71,7 +71,7 @@ def _cli(monkeypatch):
     agent.tools = None
     agent.session_id = "new-session"
     agent._compress_context.return_value = (
-        [{"role": "user", "content": "[summary]"}], "",
+        [{"role": "user", "content": "[summary]"}], "", None,
     )
     agent._flush_messages_to_session_db = lambda *a, **k: None
     cli.agent = agent

@@ -31,7 +31,7 @@ def test_focus_topic_extracted_and_passed(monkeypatch):
     """Focus topic is extracted from the command and passed to _compress_context."""
     history = _make_history()
     compressed = [history[0], history[-1]]
-    cli, _ = build_test_shell(agent_response=(compressed, ""))
+    cli, _ = build_test_shell(agent_response=(compressed, "", None))
     cli.conversation_history = history
 
     cprinted: list[str] = []
@@ -60,7 +60,7 @@ def test_focus_topic_extracted_and_passed(monkeypatch):
 def test_no_focus_topic_when_bare_command(monkeypatch):
     """When no focus topic is provided, None is passed."""
     history = _make_history()
-    cli, _ = build_test_shell(agent_response=(list(history), ""))
+    cli, _ = build_test_shell(agent_response=(list(history), "", None))
     cli.conversation_history = history
 
     with patch("agent.model_metadata.estimate_messages_tokens_rough",
@@ -75,7 +75,7 @@ def test_no_focus_topic_when_bare_command(monkeypatch):
 def test_empty_focus_after_command_treated_as_none(monkeypatch):
     """Trailing whitespace after /compress does not produce a focus topic."""
     history = _make_history()
-    cli, _ = build_test_shell(agent_response=(list(history), ""))
+    cli, _ = build_test_shell(agent_response=(list(history), "", None))
     cli.conversation_history = history
 
     with patch("agent.model_metadata.estimate_messages_tokens_rough",
@@ -91,7 +91,7 @@ def test_focus_topic_printed_in_compression_banner(monkeypatch):
     """The focus topic shows in the compression progress banner."""
     history = _make_history()
     compressed = [history[0], history[-1]]
-    cli, _ = build_test_shell(agent_response=(compressed, ""))
+    cli, _ = build_test_shell(agent_response=(compressed, "", None))
     cli.conversation_history = history
 
     cprinted: list[str] = []
@@ -109,7 +109,7 @@ def test_no_focus_prints_standard_banner(monkeypatch):
     """Without focus, the standard banner (no focus: line) is printed."""
     history = _make_history()
     compressed = [history[0], history[-1]]
-    cli, _ = build_test_shell(agent_response=(compressed, ""))
+    cli, _ = build_test_shell(agent_response=(compressed, "", None))
     cli.conversation_history = history
 
     cprinted: list[str] = []

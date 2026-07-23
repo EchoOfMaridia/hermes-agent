@@ -112,7 +112,7 @@ def _make_agent_with_cooldown(db_path, session_id, *, cooldown_until=None):
     agent.compression_enabled = True
     agent._emit_status = MagicMock()
     agent._compress_context = MagicMock(
-        side_effect=lambda messages, *_a, **_k: (messages, "SYSTEM")
+        side_effect=lambda messages, *_a, **_k: (messages, "SYSTEM", None)
     )
 
     db = SessionDB(db_path=db_path)

@@ -69,7 +69,7 @@ async def test_compress_command_reports_noop_without_success_banner():
     agent_instance.tools = None
     agent_instance.context_compressor.has_content_to_compress.return_value = True
     agent_instance.session_id = "sess-1"
-    agent_instance._compress_context.return_value = (list(history), "")
+    agent_instance._compress_context.return_value = (list(history), "", None)
 
     def _estimate(messages, **_kwargs):
         assert messages == history
@@ -106,7 +106,7 @@ async def test_compress_command_explains_when_token_estimate_rises():
     agent_instance.tools = None
     agent_instance.context_compressor.has_content_to_compress.return_value = True
     agent_instance.session_id = "sess-1"
-    agent_instance._compress_context.return_value = (compressed, "")
+    agent_instance._compress_context.return_value = (compressed, "", None)
 
     def _estimate(messages, **_kwargs):
         if messages == history:
@@ -156,7 +156,7 @@ async def test_compress_command_appends_warning_when_compression_aborts():
         "404 model not found: gemini-3-flash-preview"
     )
     agent_instance.session_id = "sess-1"
-    agent_instance._compress_context.return_value = (compressed, "")
+    agent_instance._compress_context.return_value = (compressed, "", None)
 
     def _estimate(messages, **_kwargs):
         if messages == history:
@@ -218,7 +218,7 @@ async def test_compress_command_surfaces_aux_model_failure_even_when_recovered()
         "404 model not found: gemini-3-flash-preview"
     )
     agent_instance.session_id = "sess-1"
-    agent_instance._compress_context.return_value = (compressed, "")
+    agent_instance._compress_context.return_value = (compressed, "", None)
 
     def _estimate(messages, **_kwargs):
         if messages == history:
@@ -274,7 +274,7 @@ async def test_compress_command_passes_session_db_and_persists_rotated_session()
 
     def _compress(messages, *_args, **_kwargs):
         agent_instance.session_id = "sess-2"
-        return compressed, ""
+        return compressed, "", None
 
     agent_instance._compress_context.side_effect = _compress
 
@@ -340,7 +340,7 @@ async def test_compress_command_does_not_repoint_session_when_transcript_write_f
     def _compress(messages, *_args, **_kwargs):
         # Compression rotated the session: the agent now holds a NEW session_id.
         agent_instance.session_id = "sess-2"
-        return compressed, ""
+        return compressed, "", None
 
     agent_instance._compress_context.side_effect = _compress
 
@@ -397,7 +397,7 @@ async def test_compress_command_in_place_skips_destructive_rewrite():
     # In-place compaction: session_id is UNCHANGED but marked as a success.
     agent_instance._last_compaction_in_place = True
     agent_instance.session_id = "sess-1"
-    agent_instance._compress_context.return_value = (compressed, "")
+    agent_instance._compress_context.return_value = (compressed, "", None)
 
     def _estimate(messages, **_kwargs):
         if messages == history:
@@ -439,7 +439,7 @@ async def test_compress_command_preserves_platform_and_gateway_session_key():
     agent_instance.tools = None
     agent_instance.context_compressor.has_content_to_compress.return_value = True
     agent_instance.session_id = "sess-1"
-    agent_instance._compress_context.return_value = (list(history), "")
+    agent_instance._compress_context.return_value = (list(history), "", None)
 
     with (
         patch("gateway.run._resolve_runtime_agent_kwargs", return_value={"api_key": "test-key"}),
@@ -474,7 +474,7 @@ async def test_compress_command_overrides_stale_resolver_identity():
     agent_instance.tools = None
     agent_instance.context_compressor.has_content_to_compress.return_value = True
     agent_instance.session_id = "sess-1"
-    agent_instance._compress_context.return_value = (list(history), "")
+    agent_instance._compress_context.return_value = (list(history), "", None)
 
     # Resolver injects a WRONG platform and a stale session key.
     runtime = {"api_key": "test-key", "platform": "discord", "gateway_session_key": "stale-key"}
@@ -522,7 +522,7 @@ async def test_compress_command_passes_tool_messages_to_compressor():
     agent_instance.tools = None
     agent_instance.context_compressor.has_content_to_compress.return_value = True
     agent_instance.session_id = "sess-1"
-    agent_instance._compress_context.return_value = (list(history), "")
+    agent_instance._compress_context.return_value = (list(history), "", None)
 
     with (
         patch("gateway.run._resolve_runtime_agent_kwargs", return_value={"api_key": "test-key"}),

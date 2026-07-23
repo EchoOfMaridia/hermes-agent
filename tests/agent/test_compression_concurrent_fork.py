@@ -194,7 +194,7 @@ def test_skipped_compression_returns_messages_unchanged(tmp_path: Path) -> None:
     agent = _build_agent_with_db(db, parent_sid)
     messages = [{"role": "user", "content": "m1"}, {"role": "user", "content": "m2"}]
 
-    compressed, _sp = agent._compress_context(messages, "sys", approx_tokens=120_000)
+    compressed, _sp, _ = agent._compress_context(messages, "sys", approx_tokens=120_000)
 
     # Skipped: messages returned verbatim, no rotation
     assert compressed is messages or compressed == messages
@@ -231,7 +231,7 @@ def test_compression_restores_user_turn_when_compressor_drops_all_users(tmp_path
         {"role": "assistant", "content": "working"},
     ]
 
-    compressed, _sp = agent._compress_context(messages, "sys", approx_tokens=120_000)
+    compressed, _sp, _ = agent._compress_context(messages, "sys", approx_tokens=120_000)
 
     user_messages = [msg for msg in compressed if msg.get("role") == "user"]
     assert user_messages == [{"role": "user", "content": "please continue from here"}]
@@ -486,7 +486,7 @@ def test_missing_lock_subsystem_fails_open_not_infinite_loop(tmp_path: Path, mon
             ),
         )
         messages = [{"role": "user", "content": f"m{i}"} for i in range(20)]
-        compressed, _sp = agent._compress_context(messages, "sys", approx_tokens=120_000)
+        compressed, _sp, _ = agent._compress_context(messages, "sys", approx_tokens=120_000)
     finally:
         monkeypatch.setattr(hermes_state, "SessionDB", real_session_db_type)
 
@@ -507,7 +507,7 @@ def test_nominal_sessiondb_impostor_fails_closed(tmp_path: Path) -> None:
     agent._session_db = _NominalSessionDBImpostor(db)
     messages = [{"role": "user", "content": f"m{i}"} for i in range(20)]
 
-    compressed, _sp = agent._compress_context(messages, "sys", approx_tokens=120_000)
+    compressed, _sp, _ = agent._compress_context(messages, "sys", approx_tokens=120_000)
 
     assert compressed is messages or compressed == messages
     assert agent.session_id == parent_sid
@@ -525,7 +525,7 @@ def test_noncallable_lock_api_fails_closed(tmp_path: Path) -> None:
     agent._session_db = _NonCallableLockAPI(db)
     messages = [{"role": "user", "content": f"m{i}"} for i in range(20)]
 
-    compressed, _sp = agent._compress_context(messages, "sys", approx_tokens=120_000)
+    compressed, _sp, _ = agent._compress_context(messages, "sys", approx_tokens=120_000)
 
     assert compressed is messages or compressed == messages
     assert agent.session_id == parent_sid
@@ -553,7 +553,7 @@ def test_nonmissing_lock_lookup_errors_fail_closed(
     agent._session_db = _BrokenLockLookupDB(db, error)
     messages = [{"role": "user", "content": f"m{i}"} for i in range(20)]
 
-    compressed, _sp = agent._compress_context(messages, "sys", approx_tokens=120_000)
+    compressed, _sp, _ = agent._compress_context(messages, "sys", approx_tokens=120_000)
 
     assert compressed is messages or compressed == messages
     assert agent.session_id == parent_sid
@@ -590,7 +590,7 @@ def test_real_lock_api_internal_errors_fail_closed_skips_compression(
     agent = _build_agent_with_db(db, parent_sid)
     messages = [{"role": "user", "content": f"m{i}"} for i in range(20)]
 
-    compressed, _sp = agent._compress_context(messages, "sys", approx_tokens=120_000)
+    compressed, _sp, _ = agent._compress_context(messages, "sys", approx_tokens=120_000)
 
     # Skipped: messages returned verbatim, no rotation, compressor never ran.
     assert compressed is messages or compressed == messages
@@ -615,7 +615,7 @@ def test_post_acquire_error_releases_owned_lock(tmp_path: Path, monkeypatch) -> 
     agent = _build_agent_with_db(db, parent_sid)
     messages = [{"role": "user", "content": f"m{i}"} for i in range(20)]
 
-    compressed, _sp = agent._compress_context(messages, "sys", approx_tokens=120_000)
+    compressed, _sp, _ = agent._compress_context(messages, "sys", approx_tokens=120_000)
 
     assert compressed is messages or compressed == messages
     assert agent.session_id == parent_sid

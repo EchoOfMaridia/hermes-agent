@@ -318,7 +318,7 @@ async def test_session_hygiene_messages_stay_in_originating_topic(monkeypatch, t
         def _compress_context(self, messages, *_args, **_kwargs):
             # Simulate real _compress_context: create a new session_id
             self.session_id = f"{self.session_id}_compressed"
-            return ([{"role": "assistant", "content": "compressed"}], None)
+            return ([{"role": "assistant", "content": "compressed"}], None, None)
 
     fake_run_agent = types.ModuleType("run_agent")
     fake_run_agent.AIAgent = FakeCompressAgent
@@ -421,7 +421,7 @@ async def test_session_hygiene_preserves_transcript_when_no_rotation(monkeypatch
         def _compress_context(self, messages, *_args, **_kwargs):
             # No session_db → cannot rotate: session_id is UNCHANGED, and this
             # is a failure-to-rotate, not an in-place success.
-            return ([{"role": "assistant", "content": "summary only"}], None)
+            return ([{"role": "assistant", "content": "summary only"}], None, None)
 
     fake_run_agent = types.ModuleType("run_agent")
     fake_run_agent.AIAgent = NonRotatingCompressAgent
@@ -519,7 +519,7 @@ async def test_session_hygiene_preserves_transcript_when_in_place_configured_but
             type(self).last_instance = self
 
         def _compress_context(self, messages, *_args, **_kwargs):
-            return ([{"role": "assistant", "content": "summary only"}], None)
+            return ([{"role": "assistant", "content": "summary only"}], None, None)
 
     fake_run_agent = types.ModuleType("run_agent")
     fake_run_agent.AIAgent = InPlaceConfiguredAgent
@@ -625,7 +625,7 @@ async def test_session_hygiene_warns_user_when_compression_aborts(monkeypatch, t
 
         def _compress_context(self, messages, *_args, **_kwargs):
             # Abort path: messages preserved unchanged, session NOT rotated.
-            return (messages, None)
+            return (messages, None, None)
 
     fake_run_agent = types.ModuleType("run_agent")
     fake_run_agent.AIAgent = FakeCompressAgentWithSummaryFailure
@@ -745,7 +745,7 @@ async def test_session_hygiene_informs_user_when_aux_model_fails_but_recovers(mo
 
         def _compress_context(self, messages, *_args, **_kwargs):
             self.session_id = f"{self.session_id}_compressed"
-            return ([{"role": "assistant", "content": "real summary"}], None)
+            return ([{"role": "assistant", "content": "real summary"}], None, None)
 
     fake_run_agent = types.ModuleType("run_agent")
     fake_run_agent.AIAgent = FakeCompressAgentWithAuxRecovery

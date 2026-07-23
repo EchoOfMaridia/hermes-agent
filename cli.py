@@ -9613,7 +9613,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
                 # _build_system_prompt appends system_message to prompt_parts
                 # which already contain the agent identity — resulting in the
                 # identity block appearing twice (issue #15281).
-                compressed, _ = self.agent._compress_context(
+                compressed, _, _ = self.agent._compress_context(
                     head,
                     None,
                     approx_tokens=approx_tokens,

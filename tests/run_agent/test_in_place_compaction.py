@@ -72,7 +72,7 @@ class TestInPlaceCompaction:
             agent._last_flushed_db_idx = 5
 
             messages = [{"role": "user", "content": f"m{i}"} for i in range(8)]
-            compressed, _sp = compress_context(
+            compressed, _sp, _ = compress_context(
                 agent, messages, approx_tokens=100_000, system_message="sys"
             )
 
@@ -135,7 +135,7 @@ class TestInPlaceCompaction:
             _seed(db, sid, "alt")
             agent = _make_agent(db, sid, in_place=True)
             messages = [{"role": "user", "content": f"m{i}"} for i in range(8)]
-            compressed, _ = compress_context(
+            compressed, _, _ = compress_context(
                 agent, messages, approx_tokens=100_000, system_message="sys"
             )
             roles = [m["role"] for m in compressed if m.get("role") != "system"]

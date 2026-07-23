@@ -521,7 +521,7 @@ def build_turn_context(
             for _pass in range(3):
                 _orig_len = len(messages)
                 _orig_tokens = _preflight_tokens
-                messages, active_system_prompt = agent._compress_context(
+                messages, active_system_prompt, _post_compact_context = agent._compress_context(
                     messages, system_message, approx_tokens=_preflight_tokens,
                     task_id=effective_task_id,
                 )
