@@ -1024,15 +1024,15 @@ def run_conversation(
         # per-turn: this fires at api_messages build time so the reminder is
         # the most recent user-role content the model reads before deciding.
         # Gated on cfg["agent"]["operator_directive_reminder_every_n_calls"]
-        # (default 5). Set to 0 to opt out.
+        # (default 30). Set to 0 to opt out.
         # See .hermes/plans/tpipe-vs-hermes-compliance-report-2026-07-20.md X2.
         try:
-            _rem_every_n = 15
+            _rem_every_n = 30
             try:
                 _cfg = getattr(agent, "_config", None)
                 if isinstance(_cfg, dict):
                     _agent_cfg = _cfg.get("agent") or {}
-                    _rem_v = _agent_cfg.get("operator_directive_reminder_every_n_calls", 15)
+                    _rem_v = _agent_cfg.get("operator_directive_reminder_every_n_calls", 30)
                     if isinstance(_rem_v, int):
                         _rem_every_n = _rem_v
             except Exception:
