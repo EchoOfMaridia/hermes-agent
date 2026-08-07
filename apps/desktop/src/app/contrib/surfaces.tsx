@@ -180,13 +180,13 @@ export const ChatRoutesSurface = memo(function ChatRoutesSurface({
       <Route element={page(<SkillsView setStatusbarItemGroup={setStatusbarItemGroup} />)} path="skills" />
       <Route element={page(<MessagingView setStatusbarItemGroup={setStatusbarItemGroup} />)} path="messaging" />
       <Route element={page(<ArtifactsView setStatusbarItemGroup={setStatusbarItemGroup} />)} path="artifacts" />
-      <Route element={<Navigate to={NEW_CHAT_ROUTE} replace />} path="agents" />
-      <Route element={<Navigate to={NEW_CHAT_ROUTE} replace />} path="command-center" />
-      <Route element={<Navigate to={NEW_CHAT_ROUTE} replace />} path="cron" />
-      <Route element={<Navigate to={NEW_CHAT_ROUTE} replace />} path="profiles" />
-      <Route element={<Navigate to={NEW_CHAT_ROUTE} replace />} path="settings" />
-      <Route element={<Navigate to={NEW_CHAT_ROUTE} replace />} path="starmap" />
-      <Route element={<Navigate to={NEW_CHAT_ROUTE} replace />} path="webhooks" />
+      <Route element={null} path="agents" />
+      <Route element={null} path="command-center" />
+      <Route element={null} path="cron" />
+      <Route element={null} path="profiles" />
+      <Route element={null} path="settings" />
+      <Route element={null} path="starmap" />
+      <Route element={null} path="webhooks" />
       <Route element={page(<WorkflowsRoute />)} path="workflows" />
       {/* Registry-contributed pages (core features + plugins) render in the
           workspace pane like any built-in view — behind the same blast wall
