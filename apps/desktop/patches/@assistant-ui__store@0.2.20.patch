@@ -1,0 +1,298 @@
+--- a/dist/useAui.js
++++ b/dist/useAui.js
+@@ -1,3 +1,4 @@
++// PATCH_ACTIVE_2026_AUG_02_HERMES_DESKTOP
+ "use client";
+ import { getClientIndex } from "./utils/tap-client-stack-context.js";
+ import { useClientResource } from "./useClientResource.js";
+@@ -30,7 +31,7 @@
+ 	const store = useTapRoot(function RootClient() {
+ 		return useRootClientResource({
+ 			element,
+-			emit: notifications.emit,
++			emit: notifications ? notifications.emit : undefined,
+ 			clientRef
+ 		});
+ 	});
+@@ -38,7 +39,252 @@
+ 		return store.subscribe(notifications.notifySubscribers);
+ 	}, [store, notifications]);
+ 	return useMemo(() => {
+-		const clientFunction = () => store.getValue().methods;
++		const clientFunction = () => {
++			const value = store.getValue();
++			if (value && value.state != null) {
++				return value.methods;
++			}
++			// Patch (Hermes desktop, 2026-08-02): upstream @assistant-ui/store@0.2.x calls
++			// store.getValue().methods directly without a guard. When no AuiProvider is
++			// mounted, getValue() returns the DefaultAssistantClient proxy whose .methods
++			// is undefined, so any consumer that calls aui.threads() or aui.messages()
++			// gets back undefined and then throws "undefined is not a function" at the
++			// call site. Return DefaultAssistantClient directly so the proxy's own
++			// error handling fires ("wrap in AuiProvider") instead of "undefined is
++			// not a function". DefaultAssistantClient already handles subscribe/on as
++			// no-ops and throws the right message for all other property accesses.
++			return DefaultAssistantClient;
++		};
++
++		// Patch (Hermes desktop, 2026-08-02): @assistant-ui/store's createProxiedAssistantState
++		// calls client.thread() to get the current thread runtime. HermesRuntime exposes
++		// threads (ThreadListRuntimeCore) but not thread() (ThreadRuntimeCore). Without this
++		// wrapper, client.thread() returns HermesRuntime.threads (an object, not a function),
++		// and getClientState(threadsObject) throws because threadsObject lacks the internal
++		// [SYMBOL_GET_OUTPUT] key. The wrapper makes thread() return a callable that:
++		//   - Provides the SYMBOL_GET_OUTPUT key so getClientState() finds the state
++		//   - Delegates getState() to threads.getState() (selected thread state)
++		//   - Provides subscribe()/on no-ops (HermesDesktop doesn't use aui.subscribe)
++		//   - Forwards all other properties to the threads object
++		const threadWrapper = new Proxy({}, {
++			get(target, prop) {
++				if (prop === Symbol.toStringTag) return "ThreadRuntime";
++				if (prop === "getState") {
++					return () => {
++						const threads = store.getValue()?.methods?.threads;
++						if (!threads) return { messages: [], isRunning: false };
++						const mainThread = threads.getMainThreadRuntimeCore?.();
++						if (!mainThread) return { messages: [], isRunning: false };
++						return {
++							messages: mainThread.messages ?? [],
++							isRunning: mainThread.isRunning ?? false
++						};
++					};
++				}
++				if (prop === "subscribe" || prop === "on") return () => () => {};
++				const threads = store.getValue()?.methods?.threads;
++				if (!threads) return undefined;
++				const result = threads[prop];
++				return typeof result === "function" ? result.bind(threads) : result;
++			},
++			has(target, prop) {
++				if (prop === "subscribe" || prop === "on" || prop === "getState" || prop === Symbol.toStringTag) return true;
++				const threads = store.getValue()?.methods?.threads;
++				return threads ? prop in threads : false;
++			}
++		});
++		clientFunction.thread = () => threadWrapper;
++
++		// Patch (Hermes desktop, 2026-08-02): HermesRuntime exposes threads as an object
++		// (ExternalStoreThreadListRuntimeCore) but @assistant-ui/store's t0i module calls
++		// e.threads().thread('main') and e.threads().item('main'). The raw threads object
++		// has no .thread() or .item() method. Wrap it so threads() returns a proxy that
++		// provides thread() and item() methods, plus SYMBOL_GET_OUTPUT.
++		clientFunction.composer = () => {
++		const _composerState = {
++			text: '',
++			canSend: false,
++			isLoading: false,
++			attachments: [],
++			isFocused: false,
++			disabled: false,
++			isEditing: false,
++			dictation: null,
++			isEmpty: true,
++			value: '',
++			role: 'user',
++			quote: undefined,
++			capabilities: { cancel: false, queue: false, attachmentAccept: '*/*' },
++			capabilitiesConfig: {},
++			isLastQueued: false,
++			setText: () => {},
++			appendText: () => {},
++			submit: () => {},
++			cancel: () => {},
++			reset: () => {},
++			focus: () => {},
++			blur: () => {},
++			addAttachment: () => {},
++			setAttachments: () => {},
++			removeAttachment: () => {},
++			subscribe: () => () => {},
++			on: () => () => {},
++		};
++		const _realComposer = clientFunction.threads()?.thread('main')?.composer?.();
++		if (_realComposer) return _realComposer;
++		return _composerState;
++	};
++
++		clientFunction.threads = () => {
++			const threads = store.getValue()?.methods?.threads;
++			if (!threads) return undefined;
++			const threadListProxy = new Proxy({}, {
++				get(target, prop) {
++					if (prop === Symbol.toStringTag) return "ThreadListClient";
++					if (prop === "getState") {
++						return () => {
++							const mainThread = threads.getMainThreadRuntimeCore?.();
++							if (!mainThread) return { messages: [], isRunning: false };
++							return {
++								messages: mainThread.messages ?? [],
++								isRunning: mainThread.isRunning ?? false
++							};
++						};
++					}
++					if (prop === "subscribe" || prop === "on") return () => () => {};
++					if (prop === "thread") {
++						return (id) => {
++							const mainThread = threads.getMainThreadRuntimeCore?.();
++							if (!mainThread) return new Proxy({}, {
++								get(t, p) {
++									if (p === "getState") return () => ({ messages: [], isRunning: false });
++									if (p === "subscribe" || p === "on") return () => () => {};
++									if (p === "composer") {
++										// Return a callable proxy so .composer() works
++										const composerState = {
++							text: "",
++							canSend: false,
++							isLoading: false,
++							attachments: [],
++							isFocused: false,
++							disabled: false,
++						};
++										return new Proxy(function() {}, {
++											get(t2, p2) {
++									if (p2 === "getState") return () => composerState;
++									if (p2 === "subscribe" || p2 === "on") return () => () => {};
++									if (p2 in composerState) return composerState[p2];
++									if (p2 === "setText" || p2 === "appendText" || p2 === "submit" || p2 === "cancel" || p2 === "reset" || p2 === "focus" || p2 === "blur" || p2 === "addAttachment" || p2 === "setAttachments" || p2 === "removeAttachment") return () => {};
++									return undefined;
++								},
++											has(t2, p2) {
++									return p2 === "getState" || p2 === "subscribe" || p2 === "on" || p2 === "setText" || p2 === "appendText" || p2 === "submit" || p2 === "cancel" || p2 === "reset" || p2 === "focus" || p2 === "blur" || p2 === "addAttachment" || p2 === "setAttachments" || p2 === "removeAttachment" || p2 in composerState;
++								},
++											apply(t2, thisArg, args) { return composerState; }
++										});
++									}
++									return undefined;
++								}
++							});
++							return new Proxy({}, {
++								get(t, p) {
++									if (p === 'composer') {
++										const composerState = {
++							text: '',
++							canSend: false,
++							isLoading: false,
++							attachments: [],
++							isFocused: false,
++							disabled: false,
++						};
++										const fn = function() { return composerState; };
++										fn.text = '';
++							fn.canSend = false;
++							fn.isLoading = false;
++							fn.attachments = [];
++							fn.isFocused = false;
++							fn.disabled = false;
++										fn.subscribe = () => () => {};
++										fn.on = () => () => {};
++										fn.setText = () => {};
++										fn.appendText = () => {};
++										fn.submit = () => {};
++										return fn;
++									}
++									const val = mainThread[p];
++									if (typeof val === "function") return val.bind(mainThread);
++									return val;
++								},
++								has(t, p) {
++									return p in mainThread;
++								},
++								composer() {
++									const composerState = {
++							text: '',
++							canSend: false,
++							isLoading: false,
++							attachments: [],
++							isFocused: false,
++							disabled: false,
++						};
++									const fn = function() { return composerState; };
++									fn.text = '';
++							fn.canSend = false;
++							fn.isLoading = false;
++							fn.attachments = [];
++							fn.isFocused = false;
++							fn.disabled = false;
++									fn.subscribe = () => () => {};
++									fn.on = () => () => {};
++									fn.setText = () => {};
++									fn.appendText = () => {};
++									fn.submit = () => {};
++									return fn;
++								}
++							});
++						};
++					}
++					if (prop === "item") {
++						return (id) => {
++							const item = threads.getItemById?.(id);
++							return item ?? undefined;
++						};
++					}
++					const result = threads[prop];
++					if (typeof result === "function") return result.bind(threads);
++					return result;
++				},
++				has(target, prop) {
++					if (prop === "subscribe" || prop === "on" || prop === "getState" || prop === "thread" || prop === "item" || prop === Symbol.toStringTag) return true;
++					return prop in threads;
++				},
++				apply() { return threadListProxy; }
++			});
++			return threadListProxy;
++		};
++
++		// Add SYMBOL_GET_OUTPUT to threadWrapper so getClientState(threadWrapper) works
++		try {
++			const symbols = Object.getOwnPropertySymbols(DefaultAssistantClient);
++			const getOutputSymbol = symbols.find(s => s.description === 'assistant-ui.store.getValue');
++			if (getOutputSymbol) {
++				Object.defineProperty(threadWrapper, getOutputSymbol, {
++					get: () => {
++						const threads = store.getValue()?.methods?.threads;
++						if (!threads) return { messages: [], isRunning: false };
++						const mainThread = threads.getMainThreadRuntimeCore?.();
++						if (!mainThread) return { messages: [], isRunning: false };
++						return {
++							messages: mainThread.messages ?? [],
++							isRunning: mainThread.isRunning ?? false
++						};
++					},
++					enumerable: false,
++					configurable: true
++				});
++			}
++		} catch (e) { /* ignore */ }
++
+ 		Object.defineProperties(clientFunction, {
+ 			source: {
+ 				value: "root",
+@@ -169,10 +415,24 @@
+ 	const propsRef = useRef(getResourceProps(element));
+ 	propsRef.current = getResourceProps(element);
+ 	return useMemo(() => {
+-		const clientFunction = () => propsRef.current.get(clientRef.current);
++		const clientFunction = () => {
++			const props = propsRef.current;
++			if (props && typeof props.get === 'function') {
++				return props.get(clientRef.current);
++			}
++			// Patch (Hermes desktop, 2026-07-18): upstream @assistant-ui/store@0.2.x reads
++			// propsRef.current as a Derived.Props with a `.get(parentClient)` accessor.
++			// With tap@0.9.x the resource OPTIONS are passed instead, and those options
++			// (e.g. { runtime, __internal_assistantRuntime } from RuntimeAdapter(runtime))
++			// have no `.get` method, so clientFunction() throws "s is not a function" the
++			// moment something calls aui.threads(). Fall back to returning the props
++			// object itself when no `.get` accessor exists, so surface methods on a
++			// ThreadListClient-shaped result (getState/thread/item/...) stay reachable.
++			return props;
++		};
+ 		Object.defineProperties(clientFunction, {
+-			source: { value: propsRef.current.source },
+-			query: { value: propsRef.current.query },
++			source: { value: propsRef.current ? propsRef.current.source : undefined },
++			query: { value: propsRef.current ? propsRef.current.query : undefined },
+ 			name: {
+ 				value: name,
+ 				configurable: true

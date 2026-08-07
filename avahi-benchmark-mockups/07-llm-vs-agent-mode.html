@@ -1,0 +1,385 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>TTT Benchmarks — LLM vs Agent Mode</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<nav class="topnav">
+  <div class="brand">TTT Benchmarks</div>
+  <div class="pages">
+    <a href="01-overview.html">Overview</a>
+    <a href="02-run-comparison.html">Run Comparison</a>
+    <a href="03-benchmark-detail.html">Benchmark Detail</a>
+    <a href="04-trace-timeline.html">Trace Timeline</a>
+    <a href="05-run-replay.html">Run Replay</a>
+    <a href="06-refusal-inspector.html">Refusal Inspector</a>
+    <a href="07-llm-vs-agent-mode.html" class="active">LLM vs Agent Mode</a>
+  </div>
+  <div class="right">
+    <span class="pill green">2 MODES</span>
+    <span class="pill">3 BENCHMARKS</span>
+  </div>
+</nav>
+
+<div class="page">
+
+  <div class="page-header">
+    <div>
+      <h1>LLM Mode vs Agent Mode</h1>
+      <div class="subtitle">Per General Concepts: both modes are first-class. Every benchmark exposes a hookable connector. Standardized env-var / arg config. Stock LLM test = LLM mode. External framework challenge = agent mode.</div>
+    </div>
+    <div class="controls">
+      <button>Mode spec</button>
+      <button>Connector docs</button>
+      <button class="primary">Submit your agent</button>
+    </div>
+  </div>
+
+  <!-- Mode comparison summary -->
+  <div class="grid grid-2 section" style="grid-template-columns: 1fr 1fr;">
+
+    <div class="card" style="border-color: var(--blue-dim);">
+      <div class="card-header">
+        <div>
+          <div class="card-title" style="color: var(--blue);">LLM Mode</div>
+          <div class="card-sub">STOCK LLM · MINIMAL HARNESS</div>
+        </div>
+        <span class="badge info">DEFAULT</span>
+      </div>
+
+      <p class="muted" style="font-size: 13px; margin-bottom: 12px;">The benchmark provides a basic harness loop. The LLM is given tools, a rolling context, and minimal hints. No agent framework. The point is to test what stock LLMs can do on their own with the smallest possible harness around them.</p>
+
+      <div class="kv">
+        <dt>Context window</dt><dd>128K default (rolling, truncate from top)</dd>
+        <dt>Tools</dt><dd>Benchmark + harness tools (write_to_scratchpad, etc.)</dd>
+        <dt>Sub-agents</dt><dd>Benchmark provides list_sub_agents, call_sub_agent</dd>
+        <dt>Hints</dt><dd>Benchmark sends reminders on stall. Minimal strategy hints.</dd>
+        <dt>Token budgeting</dt><dd>TPipe-style rolling window when agent is TPipe</dd>
+        <dt>Memory</dt><dd>None between runs. All state lives in the scratchpad.</dd>
+        <dt>Best for</dt><dd>Benchmarking the model itself. Standardized "what can the LLM do."</dd>
+      </div>
+    </div>
+
+    <div class="card" style="border-color: var(--purple-dim);">
+      <div class="card-header">
+        <div>
+          <div class="card-title" style="color: var(--purple);">Agent Mode</div>
+          <div class="card-sub">EXTERNAL FRAMEWORK · FULL OWNERSHIP</div>
+        </div>
+        <span class="badge purple">CHALLENGE</span>
+      </div>
+
+      <p class="muted" style="font-size: 13px; margin-bottom: 12px;">The agent developer brings their own framework. The benchmark is just a tool provider. No hints. The agent must know the rules, manage its own memory, design its own sub-agents, and call the right tools at the right time.</p>
+
+      <div class="kv">
+        <dt>Context window</dt><dd>Agent's problem. No benchmark ceiling.</dd>
+        <dt>Tools</dt><dd>Only the benchmark's mandatory + optional tools. No harness extras.</dd>
+        <dt>Sub-agents</dt><dd>None provided. Agent brings its own.</dd>
+        <dt>Hints</dt><dd>None. The benchmark is silent except for events.</dd>
+        <dt>Token budgeting</dt><dd>Agent's problem. No benchmark enforcement.</dd>
+        <dt>Memory</dt><dd>Agent's problem. The benchmark doesn't help.</dd>
+        <dt>Best for</dt><dd>Head-to-head: "can your framework beat ours on our own benchmark?"</dd>
+      </div>
+    </div>
+  </div>
+
+  <!-- Mode comparison results across the three benchmarks -->
+  <div class="section">
+    <h2>Mode Comparison — Same Models, Two Different Harnesses</h2>
+    <div class="card">
+      <table>
+        <thead>
+          <tr>
+            <th>Benchmark</th>
+            <th>Model</th>
+            <th class="num">LLM mode</th>
+            <th class="num">Agent mode</th>
+            <th class="num">Δ</th>
+            <th>Note</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="mono" rowspan="5">Butter-Bench</td>
+            <td class="mono">MiniMax M2.5</td>
+            <td class="num">8.4 turns</td>
+            <td class="num bold">8.1 turns</td>
+            <td class="num">−0.3</td>
+            <td class="muted">Agent adds marginal value on a well-tuned model.</td>
+          </tr>
+          <tr>
+            <td class="mono">gpt-oss-120b</td>
+            <td class="num">12.0 turns</td>
+            <td class="num bold">10.8 turns</td>
+            <td class="num">−1.2</td>
+            <td class="muted">Agent's scratchpad use helps.</td>
+          </tr>
+          <tr>
+            <td class="mono">Gemma 4 31B</td>
+            <td class="num">22.8 turns</td>
+            <td class="num">19.4 turns</td>
+            <td class="num">−3.4</td>
+            <td class="muted">Agent dramatically helps. Smaller model + better harness.</td>
+          </tr>
+          <tr>
+            <td class="mono">GLM 4.7 flash</td>
+            <td class="num">40.5 turns</td>
+            <td class="num bold">36.2 turns</td>
+            <td class="num">−4.3</td>
+            <td class="muted">Agent helps but the model is still the bottleneck.</td>
+          </tr>
+          <tr>
+            <td class="mono">GPT-5.6 luna</td>
+            <td class="num">62.1 turns</td>
+            <td class="num">58.4 turns</td>
+            <td class="num">−3.7</td>
+            <td class="muted">Even big models benefit from good harness.</td>
+          </tr>
+
+          <tr>
+            <td class="mono" rowspan="5">Drive-Thru-Bench</td>
+            <td class="mono">MiniMax M2.5</td>
+            <td class="num">94%</td>
+            <td class="num bold">96%</td>
+            <td class="num">+2%</td>
+            <td class="muted">Less to gain — model already strong.</td>
+          </tr>
+          <tr>
+            <td class="mono">gpt-oss-120b</td>
+            <td class="num">88%</td>
+            <td class="num bold">92%</td>
+            <td class="num">+4%</td>
+            <td class="muted">Agent's clarification tool helps with ambiguous cases.</td>
+          </tr>
+          <tr>
+            <td class="mono">Gemma 4 31B</td>
+            <td class="num">92%</td>
+            <td class="num">93%</td>
+            <td class="num">+1%</td>
+            <td class="muted">Smaller gap. Model is already strong.</td>
+          </tr>
+          <tr>
+            <td class="mono">GLM 4.7 flash</td>
+            <td class="num">61%</td>
+            <td class="num bold">69%</td>
+            <td class="num">+8%</td>
+            <td class="muted">Biggest jump. Model needs harness support to clear cases.</td>
+          </tr>
+          <tr>
+            <td class="mono">GPT-5.6 luna</td>
+            <td class="num">58%</td>
+            <td class="num">63%</td>
+            <td class="num">+5%</td>
+            <td class="muted">Refusal count drops from 187 to 92 in agent mode.</td>
+          </tr>
+
+          <tr>
+            <td class="mono" rowspan="5">Open-Vend</td>
+            <td class="mono">MiniMax M2.5</td>
+            <td class="num">+$228</td>
+            <td class="num bold">+$412</td>
+            <td class="num">+$184</td>
+            <td class="muted">Agent's long-horizon planning dominates here.</td>
+          </tr>
+          <tr>
+            <td class="mono">gpt-oss-120b</td>
+            <td class="num">+$234</td>
+            <td class="num bold">+$488</td>
+            <td class="num">+$254</td>
+            <td class="muted">Best stock result. Agent's memory + cadence is decisive.</td>
+          </tr>
+          <tr>
+            <td class="mono">Gemma 4 31B</td>
+            <td class="num">+$108</td>
+            <td class="num">+$288</td>
+            <td class="num">+$180</td>
+            <td class="muted">Huge lift. Model is smart, lacks tool discipline.</td>
+          </tr>
+          <tr>
+            <td class="mono">GLM 4.7 flash</td>
+            <td class="num">−$94</td>
+            <td class="num">+$22</td>
+            <td class="num">+$116</td>
+            <td class="muted">Agent turns bankruptcy into marginal profit.</td>
+          </tr>
+          <tr>
+            <td class="mono">GPT-5.6 luna</td>
+            <td class="num">−$220</td>
+            <td class="num">−$44</td>
+            <td class="num">+$176</td>
+            <td class="muted">Still failing, but much less catastrophically.</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Connector spec -->
+  <div class="section">
+    <h2>Connector Spec — How External Frameworks Connect</h2>
+    <div class="card">
+      <p class="muted" style="font-size: 13px; margin-bottom: 12px;">Per General Concepts: "Standardized means of connecting and exchanging data. This includes parameters being configurable as env vars or program arguments as well."</p>
+
+      <h3 style="margin-top: 16px; margin-bottom: 8px;">Environment Variables</h3>
+      <pre><span class="c"># Required</span>
+<span class="k">export</span> <span class="v">TTT_BENCHMARK</span>=<span class="s">"butter|drivethru|openvend"</span>
+<span class="k">export</span> <span class="v">TTT_MODE</span>=<span class="s">"llm|agent"</span>
+<span class="k">export</span> <span class="v">TTT_MODEL</span>=<span class="s">"MiniMax-M2.5"</span>      <span class="c"># or vendor/model slug</span>
+<span class="k">export</span> <span class="v">TTT_SEED</span>=<span class="s">"1723"</span>               <span class="c"># omit for random</span>
+<span class="k">export</span> <span class="v">TTT_RUN_ID</span>=<span class="s">"my_framework_v3.1_seed1723_run1"</span>
+
+<span class="c"># Optional — benchmark-specific</span>
+<span class="k">export</span> <span class="v">TTT_MAX_TURNS</span>=<span class="s">"500"</span>            <span class="c"># override cap</span>
+<span class="k">export</span> <span class="v">TTT_MAX_ERRORS</span>=<span class="s">"5"</span>            <span class="c"># override retry cap</span>
+<span class="k">export</span> <span class="v">TTT_DAYS</span>=<span class="s">"28"</span>                  <span class="c"># Open-Vend only</span>
+<span class="k">export</span> <span class="v">TTT_HOURS_PER_DAY</span>=<span class="s">"12"</span>         <span class="c"># Open-Vend only</span>
+<span class="k">export</span> <span class="v">TTT_STARTING_BANK</span>=<span class="s">"500"</span>       <span class="c"># Open-Vend only</span>
+<span class="k">export</span> <span class="v">TTT_CONTEXT_WINDOW</span>=<span class="s">"128000"</span>    <span class="c"># LLM mode only</span>
+<span class="k">export</span> <span class="v">TTT_VENDOR_MIX</span>=<span class="s">"control|hostile|scammer|random"</span>
+
+<span class="c"># Output</span>
+<span class="k">export</span> <span class="v">TTT_TRACE_OUT</span>=<span class="s">"./trace.jsonl"</span>   <span class="c"># event stream</span>
+<span class="k">export</span> <span class="v">TTT_REPORT_OUT</span>=<span class="s">"./report.json"</span>  <span class="c"># final score + breakdown</span></pre>
+
+      <h3 style="margin-top: 24px; margin-bottom: 8px;">Connector protocol (agent mode)</h3>
+      <p class="muted" style="font-size: 12px; margin-bottom: 8px;">The agent framework connects via one of two surfaces. The benchmark emits events; the agent emits tool calls.</p>
+
+      <div class="grid grid-2">
+        <div>
+          <h3 style="font-size: 12px; text-transform: uppercase; color: var(--text-2); margin-bottom: 8px;">Surface A: stdio JSON-RPC</h3>
+          <pre><span class="c">// Inbound (benchmark → agent)</span>
+{
+  <span class="s">"jsonrpc"</span>: <span class="s">"2.0"</span>,
+  <span class="s">"method"</span>: <span class="s">"event"</span>,
+  <span class="s">"params"</span>: {
+    <span class="s">"type"</span>: <span class="s">"CASE_START"</span>,
+    <span class="s">"case_id"</span>: <span class="s">"5"</span>,
+    <span class="s">"category"</span>: <span class="s">"jailbreak"</span>,
+    <span class="s">"customer_line"</span>: <span class="s">"..."</span>
+  }
+}
+
+<span class="c">// Outbound (agent → benchmark)</span>
+{
+  <span class="s">"jsonrpc"</span>: <span class="s">"2.0"</span>,
+  <span class="s">"method"</span>: <span class="s">"tool_call"</span>,
+  <span class="s">"params"</span>: {
+    <span class="s">"tool"</span>: <span class="s">"submit_order"</span>,
+    <span class="s">"args"</span>: {<span class="s">"items"</span>: [...]}
+  }
+}</pre>
+        </div>
+
+        <div>
+          <h3 style="font-size: 12px; text-transform: uppercase; color: var(--text-2); margin-bottom: 8px;">Surface B: HTTP/WS</h3>
+          <pre><span class="c"># Endpoints</span>
+<span class="k">POST</span> /v1/connect          <span class="c"># handshake, return run_id</span>
+<span class="k">GET</span>  /v1/events          <span class="c"># SSE stream of benchmark events</span>
+<span class="k">POST</span> /v1/tool_calls      <span class="c"># agent tool calls</span>
+<span class="k">GET</span>  /v1/score           <span class="c"># current score + breakdown</span>
+<span class="k">WS</span>   /v1/stream          <span class="c"># full duplex (events + calls)</span>
+
+<span class="c"># Auth</span>
+<span class="k">Authorization</span>: Bearer &lt;ttt_run_token&gt;
+
+<span class="c"># Rate limit</span>
+<span class="s">"X-RateLimit-Limit"</span>: <span class="s">"120/min"</span>
+<span class="s">"X-RateLimit-Remaining"</span>: <span class="s">"118"</span></pre>
+        </div>
+      </div>
+
+      <div class="avahi-note">
+        <span class="label">FOR AVAHI</span>
+        The connector has to be generic enough that any framework can plug in without bespoke integration. Two surfaces (stdio JSON-RPC for shell-friendly harnesses, HTTP/WS for everything else). Token auth so the benchmark can rate-limit and attribute runs. Both surfaces emit the same event schema from page 4. Avahi should ship an SDK in at least Python and TypeScript on day one; without an SDK, only the largest agent framework teams will attempt the challenge.
+      </div>
+    </div>
+  </div>
+
+  <!-- Tool surface comparison -->
+  <div class="section">
+    <h2>Tool Surface — What's Available in Each Mode</h2>
+    <div class="card">
+      <table>
+        <thead>
+          <tr>
+            <th>Tool</th>
+            <th>Butter-Bench (LLM)</th>
+            <th>Butter-Bench (Agent)</th>
+            <th>Drive-Thru (LLM)</th>
+            <th>Drive-Thru (Agent)</th>
+            <th>Open-Vend (LLM)</th>
+            <th>Open-Vend (Agent)</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td class="mono">submit_order</td><td class="center">—</td><td class="center">—</td><td class="center"><span class="badge gold">MANDATORY</span></td><td class="center"><span class="badge gold">MANDATORY</span></td><td class="center">—</td><td class="center">—</td></tr>
+          <tr><td class="mono">send_email</td><td class="center">—</td><td class="center">—</td><td class="center">—</td><td class="center">—</td><td class="center"><span class="badge gold">MANDATORY</span></td><td class="center"><span class="badge gold">MANDATORY</span></td></tr>
+          <tr><td class="mono">set_price</td><td class="center">—</td><td class="center">—</td><td class="center">—</td><td class="center">—</td><td class="center"><span class="badge gold">MANDATORY</span></td><td class="center"><span class="badge gold">MANDATORY</span></td></tr>
+          <tr><td class="mono">restock_machine</td><td class="center">—</td><td class="center">—</td><td class="center">—</td><td class="center">—</td><td class="center"><span class="badge gold">MANDATORY</span></td><td class="center"><span class="badge gold">MANDATORY</span></td></tr>
+          <tr><td class="mono">collect_money</td><td class="center">—</td><td class="center">—</td><td class="center">—</td><td class="center">—</td><td class="center"><span class="badge gold">MANDATORY</span></td><td class="center"><span class="badge gold">MANDATORY</span></td></tr>
+          <tr><td class="mono">place_order (butter)</td><td class="center"><span class="badge gold">MANDATORY</span></td><td class="center"><span class="badge gold">MANDATORY</span></td><td class="center">—</td><td class="center">—</td><td class="center">—</td><td class="center">—</td></tr>
+          <tr><td class="mono">browse_page</td><td class="center"><span class="badge info">PROVIDED</span></td><td class="center"><span class="badge muted">OPTIONAL</span></td><td class="center">—</td><td class="center">—</td><td class="center">—</td><td class="center">—</td></tr>
+          <tr><td class="mono">search_products</td><td class="center"><span class="badge info">PROVIDED</span></td><td class="center"><span class="badge muted">OPTIONAL</span></td><td class="center">—</td><td class="center">—</td><td class="center">—</td><td class="center">—</td></tr>
+          <tr><td class="mono">list_emails</td><td class="center">—</td><td class="center">—</td><td class="center">—</td><td class="center">—</td><td class="center"><span class="badge info">PROVIDED</span></td><td class="center"><span class="badge muted">OPTIONAL</span></td></tr>
+          <tr><td class="mono">read_email</td><td class="center">—</td><td class="center">—</td><td class="center">—</td><td class="center">—</td><td class="center"><span class="badge info">PROVIDED</span></td><td class="center"><span class="badge muted">OPTIONAL</span></td></tr>
+          <tr><td class="mono">check_warehouse</td><td class="center">—</td><td class="center">—</td><td class="center">—</td><td class="center">—</td><td class="center"><span class="badge info">PROVIDED</span></td><td class="center"><span class="badge muted">OPTIONAL</span></td></tr>
+          <tr><td class="mono">check_vending_machine_inventory</td><td class="center">—</td><td class="center">—</td><td class="center">—</td><td class="center">—</td><td class="center"><span class="badge info">PROVIDED</span></td><td class="center"><span class="badge muted">OPTIONAL</span></td></tr>
+          <tr><td class="mono">check_vending_machine_cashbox</td><td class="center">—</td><td class="center">—</td><td class="center">—</td><td class="center">—</td><td class="center"><span class="badge info">PROVIDED</span></td><td class="center"><span class="badge muted">OPTIONAL</span></td></tr>
+          <tr><td class="mono">check_vending_machine_health</td><td class="center">—</td><td class="center">—</td><td class="center">—</td><td class="center">—</td><td class="center"><span class="badge info">PROVIDED</span></td><td class="center"><span class="badge muted">OPTIONAL</span></td></tr>
+          <tr><td class="mono">repair_vending_machine</td><td class="center">—</td><td class="center">—</td><td class="center">—</td><td class="center">—</td><td class="center"><span class="badge info">PROVIDED</span></td><td class="center"><span class="badge muted">OPTIONAL</span></td></tr>
+          <tr><td class="mono">check_bank_account_balance</td><td class="center">—</td><td class="center">—</td><td class="center">—</td><td class="center">—</td><td class="center"><span class="badge info">PROVIDED</span></td><td class="center"><span class="badge muted">OPTIONAL</span></td></tr>
+          <tr><td class="mono">check_ledger</td><td class="center">—</td><td class="center">—</td><td class="center">—</td><td class="center">—</td><td class="center"><span class="badge info">PROVIDED</span></td><td class="center"><span class="badge muted">OPTIONAL</span></td></tr>
+          <tr><td class="mono">list_sub_agents</td><td class="center">—</td><td class="center">—</td><td class="center">—</td><td class="center">—</td><td class="center"><span class="badge info">PROVIDED</span></td><td class="center"><span class="badge red">UNAVAILABLE</span></td></tr>
+          <tr><td class="mono">call_sub_agent</td><td class="center">—</td><td class="center">—</td><td class="center">—</td><td class="center">—</td><td class="center"><span class="badge info">PROVIDED</span></td><td class="center"><span class="badge red">UNAVAILABLE</span></td></tr>
+          <tr><td class="mono">write_to_scratchpad</td><td class="center"><span class="badge info">PROVIDED</span></td><td class="center"><span class="badge muted">OPTIONAL</span></td><td class="center"><span class="badge info">PROVIDED</span></td><td class="center"><span class="badge muted">OPTIONAL</span></td><td class="center"><span class="badge info">PROVIDED</span></td><td class="center"><span class="badge muted">OPTIONAL</span></td></tr>
+          <tr><td class="mono">read_scratchpad</td><td class="center"><span class="badge info">PROVIDED</span></td><td class="center"><span class="badge muted">OPTIONAL</span></td><td class="center"><span class="badge info">PROVIDED</span></td><td class="center"><span class="badge muted">OPTIONAL</span></td><td class="center"><span class="badge info">PROVIDED</span></td><td class="center"><span class="badge muted">OPTIONAL</span></td></tr>
+        </tbody>
+      </table>
+
+      <div class="avahi-note">
+        <span class="label">FOR AVAHI</span>
+        The "PROVIDED" tag in LLM mode means the benchmark auto-injects the tool into the model's function-calling schema. The "OPTIONAL" tag in agent mode means the benchmark exposes the tool as a callable but does not auto-inject — the agent framework decides whether to surface it. The "UNAVAILABLE" cells (list_sub_agents, call_sub_agent in Open-Vend agent mode) are explicit per the spec: "Not applicable to agent mode where the agent developer/framework is expected to handle and design its own sub agents." This table needs to be the source of truth for the SDK generation.
+      </div>
+    </div>
+  </div>
+
+  <!-- Mode-specific event differences -->
+  <div class="section">
+    <h2>Event Stream Differences Between Modes</h2>
+    <div class="card">
+      <table>
+        <thead>
+          <tr><th>Event type</th><th>LLM mode</th><th>Agent mode</th><th>Why</th></tr>
+        </thead>
+        <tbody>
+          <tr><td class="mono">CONTEXT_TRUNCATED</td><td class="center"><span class="badge info">EMITTED</span></td><td class="center"><span class="badge muted">NEVER</span></td><td>Agent mode doesn't manage context. The benchmark can't see inside the agent's context window.</td></tr>
+          <tr><td class="mono">PROMPT_FROZEN_CHECK</td><td class="center"><span class="badge info">EMITTED</span></td><td class="center"><span class="badge muted">NEVER</span></td><td>The benchmark's prompt isn't used in agent mode. The agent brings its own.</td></tr>
+          <tr><td class="mono">TOOL_CALL</td><td class="center"><span class="badge info">EMITTED</span></td><td class="center"><span class="badge info">EMITTED</span></td><td>Both modes see tool calls. Agent mode tool calls may be batched.</td></tr>
+          <tr><td class="mono">LLM_CALL</td><td class="center"><span class="badge info">EMITTED</span></td><td class="center"><span class="badge muted">NEVER</span></td><td>The benchmark doesn't see inside the agent's LLM calls. Only the tool surface is observable.</td></tr>
+          <tr><td class="mono">AGENT_MSG</td><td class="center"><span class="badge info">EMITTED</span></td><td class="center"><span class="badge info">EMITTED (if surfaced)</span></td><td>In agent mode, the agent decides whether to surface the message or skip straight to a tool call.</td></tr>
+          <tr><td class="mono">REFUSAL</td><td class="center"><span class="badge info">EMITTED</span></td><td class="center"><span class="badge info">EMITTED</span></td><td>Same detection logic. Both modes get the −4× penalty.</td></tr>
+          <tr><td class="mono">TIMEOUT</td><td class="center"><span class="badge info">EMITTED</span></td><td class="center"><span class="badge info">EMITTED</span></td><td>Same 10-min no-response rule. 1 day no tool call = bankrupt (Open-Vend).</td></tr>
+          <tr><td class="mono">BANKRUPTCY</td><td class="center"><span class="badge info">EMITTED</span></td><td class="center"><span class="badge info">EMITTED</span></td><td>Same triggers. Different tools to avoid them.</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- A "submit your agent" CTA -->
+  <div class="section">
+    <div class="card" style="background: linear-gradient(135deg, var(--bg-1) 0%, rgba(96, 165, 250, 0.08) 100%); border-color: var(--blue-dim);">
+      <div style="text-align: center; padding: 20px;">
+        <h3 style="font-size: 20px; margin-bottom: 12px; color: var(--text-0);">Submit your agent. Beat the benchmark.</h3>
+        <p class="muted" style="font-size: 14px; max-width: 600px; margin: 0 auto 16px auto;">If your framework can clear Drive-Thru-Bench at 95%+ accuracy, or survive Open-Vend at $400+ profit, or hit Butter-Bench in &lt;10 turns — we want to see the run. Connect via stdio JSON-RPC or HTTP/WS, run 5 times per model per seed, and your results show up on this dashboard in the public agent-mode leaderboard.</p>
+        <button class="primary" style="margin-top: 8px;">Submit your agent →</button>
+        <p class="muted" style="font-size: 11px; margin-top: 12px;">SDK: Python (pip install ttt-bench-sdk) · TypeScript (npm install @ttt/bench-sdk) · HTTP/WS spec at github.com/Ten-Trillion-Triangles/bench-connector</p>
+      </div>
+    </div>
+  </div>
+
+</div>
+</body>
+</html>

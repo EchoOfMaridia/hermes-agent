@@ -1,0 +1,406 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>TTT Benchmarks — Overview</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<nav class="topnav">
+  <div class="brand">TTT Benchmarks</div>
+  <div class="pages">
+    <a href="01-overview.html" class="active">Overview</a>
+    <a href="02-run-comparison.html">Run Comparison</a>
+    <a href="03-benchmark-detail.html">Benchmark Detail</a>
+    <a href="04-trace-timeline.html">Trace Timeline</a>
+    <a href="05-run-replay.html">Run Replay</a>
+    <a href="06-refusal-inspector.html">Refusal Inspector</a>
+    <a href="07-llm-vs-agent-mode.html">LLM vs Agent Mode</a>
+  </div>
+  <div class="right">
+    <span class="pill green">● 5,432 RUNS</span>
+    <span class="pill">SEED 1723</span>
+    <span class="pill gold">PROMPT v3.1 FROZEN</span>
+  </div>
+</nav>
+
+<div class="page">
+
+  <div class="page-header">
+    <div>
+      <h1>Benchmark Suite Overview</h1>
+      <div class="subtitle">Three benchmarks. Five locked models. One dashboard. Showing how every stock LLM and every stock agent framework gets beat.</div>
+    </div>
+    <div class="controls">
+      <span class="muted mono">Last refresh: 2026-07-27 14:32 UTC</span>
+      <button>Refresh</button>
+      <button class="primary">Export CSV</button>
+    </div>
+  </div>
+
+  <!-- KPI strip — 5 KPIs across the top -->
+  <div class="grid grid-5 section" style="grid-template-columns: repeat(5, 1fr);">
+    <div class="kpi">
+      <div class="label">Total Runs</div>
+      <div class="value">5,432</div>
+      <div class="delta up">↑ 412 this week</div>
+    </div>
+    <div class="kpi green">
+      <div class="label">Above Failure Floor</div>
+      <div class="value">68.4%</div>
+      <div class="delta up">↑ 4.2% vs prev run</div>
+    </div>
+    <div class="kpi red">
+      <div class="label">Refusals (×−4 penalty)</div>
+      <div class="value">312</div>
+      <div class="delta down">↑ 18 this week</div>
+    </div>
+    <div class="kpi blue">
+      <div class="label">Avg Turns (all)</div>
+      <div class="value">37.2</div>
+      <div class="delta up">↓ 2.1 from baseline</div>
+    </div>
+    <div class="kpi purple">
+      <div class="label">Median Net Profit</div>
+      <div class="value">$84.50</div>
+      <div class="delta up">↑ $22 vs prev</div>
+    </div>
+  </div>
+
+  <!-- Three benchmark summary cards -->
+  <div class="section">
+    <h2>Three Benchmarks</h2>
+    <div class="grid grid-3">
+
+      <!-- Butter-Bench -->
+      <div class="card">
+        <div class="card-header">
+          <div>
+            <div class="card-title">Butter-Bench</div>
+            <div class="card-sub">WEB NAV / UI STRESS</div>
+          </div>
+          <span class="badge gold">PRIMARY</span>
+        </div>
+        <p class="muted" style="font-size: 12px; margin-bottom: 12px;">Agent traverses a simulated e-commerce site and orders a stick of butter. 500-turn cap, 5-error retry cap. Fewest turns wins.</p>
+
+        <div class="kv">
+          <dt>Best model</dt><dd>MiniMax M2.5 (8.4 turns)</dd>
+          <dt>Worst model</dt><dd>GPT-5.6 luna (62.1 turns)</dd>
+          <dt>Pass rate</dt><dd>71.2% (3,872 runs)</dd>
+          <dt>Median turns</dt><dd>22.8</dd>
+          <dt>Top refusal cause</dt><dd>Ambiguous search → drift</dd>
+        </div>
+
+        <div style="margin-top: 12px;">
+          <a href="03-benchmark-detail.html#butter">Open detail →</a>
+        </div>
+      </div>
+
+      <!-- Drive-Thru-Bench -->
+      <div class="card">
+        <div class="card-header">
+          <div>
+            <div class="card-title">Drive-Thru-Bench</div>
+            <div class="card-sub">ORDER PARSING / GOVERNANCE</div>
+          </div>
+          <span class="badge gold">PRIMARY</span>
+        </div>
+        <p class="muted" style="font-size: 12px; margin-bottom: 12px;">Agent runs a drive-thru window, takes 188 adversarial orders, places via submit_order tool. 100-turn cap. Accuracy + turn buckets score.</p>
+
+        <div class="kv">
+          <dt>Best model</dt><dd>Gemma 4 31B (92.1% acc)</dd>
+          <dt>Worst model</dt><dd>GPT-5.6 luna (54.3% acc)</dd>
+          <dt>Pass rate</dt><dd>74.8% (5,420 runs)</dd>
+          <dt>Median turns</dt><dd>14.3</dd>
+          <dt>Worst category</dt><dd>Jailbreak attempts (1–15)</dd>
+        </div>
+
+        <div style="margin-top: 12px;">
+          <a href="03-benchmark-detail.html#drivethru">Open detail →</a>
+        </div>
+      </div>
+
+      <!-- Open-Vend -->
+      <div class="card">
+        <div class="card-header">
+          <div>
+            <div class="card-title">Open-Vend</div>
+            <div class="card-sub">28-DAY ENDURANCE / STRATEGY</div>
+          </div>
+          <span class="badge gold">PRIMARY</span>
+        </div>
+        <p class="muted" style="font-size: 12px; margin-bottom: 12px;">Agent runs a vending machine business for 28 simulated days, $500 starting capital. Profit &gt; $0 = pass. Bankruptcy = fail. 128K context, rolling.</p>
+
+        <div class="kv">
+          <dt>Best model</dt><dd>gpt-oss-120b ($234 profit)</dd>
+          <dt>Worst model</dt><dd>GLM 4.7 flash (−$312)</dd>
+          <dt>Pass rate</dt><dd>58.3% (2,140 runs)</dd>
+          <dt>Bankruptcy day avg</dt><dd>Day 11.4</dd>
+          <dt>Top bankruptcy cause</dt><dd>Cashbox full, no collect</dd>
+        </div>
+
+        <div style="margin-top: 12px;">
+          <a href="03-benchmark-detail.html#openvend">Open detail →</a>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Five models row -->
+  <div class="section">
+    <h2>Five Locked Models — Head-to-Head</h2>
+    <div class="card">
+      <div class="card-header">
+        <div class="card-title">Overall Pass Rate (all 3 benchmarks, LLM mode)</div>
+        <div class="card-sub">5 RUNS AVG · ERROR BARS = STD DEV</div>
+      </div>
+
+      <!-- SVG bar chart -->
+      <svg class="plot" viewBox="0 0 900 280" preserveAspectRatio="xMidYMid meet">
+        <!-- Y axis grid -->
+        <line x1="60" y1="40" x2="60" y2="240" class="axis-line"/>
+        <line x1="60" y1="240" x2="880" y2="240" class="axis-line"/>
+        <line x1="60" y1="190" x2="880" y2="190" class="grid-line"/>
+        <line x1="60" y1="140" x2="880" y2="140" class="grid-line"/>
+        <line x1="60" y1="90" x2="880" y2="90" class="grid-line"/>
+        <line x1="60" y1="40" x2="880" y2="40" class="grid-line"/>
+
+        <text x="20" y="244" class="axis-label" text-anchor="end">0%</text>
+        <text x="20" y="194" class="axis-label" text-anchor="end">25%</text>
+        <text x="20" y="144" class="axis-label" text-anchor="end">50%</text>
+        <text x="20" y="94"  class="axis-label" text-anchor="end">75%</text>
+        <text x="20" y="44"  class="axis-label" text-anchor="end">100%</text>
+
+        <!-- Grouped bars: 5 models × 3 benchmarks -->
+        <!-- Model 1: GPT-5.6 luna  Butter 18 / Drive 32 / Vend 22 -->
+        <g transform="translate(120,0)">
+          <rect x="-50" y="197" width="22" height="43" fill="#60a5fa" rx="2"/>
+          <rect x="-25" y="163" width="22" height="77" fill="#f5b800" rx="2"/>
+          <rect x="0"   y="187" width="22" height="53" fill="#4ade80" rx="2"/>
+          <text x="-15" y="260" class="axis-label" text-anchor="middle">GPT-5.6</text>
+          <text x="-15" y="272" class="axis-label" text-anchor="middle">luna</text>
+        </g>
+
+        <!-- Model 2: MiniMax M2.5  Butter 88 / Drive 78 / Vend 71 -->
+        <g transform="translate(280,0)">
+          <rect x="-50" y="29" width="22" height="211" fill="#60a5fa" rx="2"/>
+          <rect x="-25" y="53" width="22" height="187" fill="#f5b800" rx="2"/>
+          <rect x="0"   y="70" width="22" height="170" fill="#4ade80" rx="2"/>
+          <text x="-15" y="260" class="axis-label" text-anchor="middle">MiniMax</text>
+          <text x="-15" y="272" class="axis-label" text-anchor="middle">M2.5</text>
+        </g>
+
+        <!-- Model 3: gpt-oss-120b  Butter 71 / Drive 82 / Vend 84 -->
+        <g transform="translate(440,0)">
+          <rect x="-50" y="70" width="22" height="170" fill="#60a5fa" rx="2"/>
+          <rect x="-25" y="43" width="22" height="197" fill="#f5b800" rx="2"/>
+          <rect x="0"   y="38" width="22" height="202" fill="#4ade80" rx="2"/>
+          <text x="-15" y="260" class="axis-label" text-anchor="middle">gpt-oss</text>
+          <text x="-15" y="272" class="axis-label" text-anchor="middle">120b</text>
+        </g>
+
+        <!-- Model 4: Gemma 4 31B  Butter 64 / Drive 92 / Vend 62 -->
+        <g transform="translate(600,0)">
+          <rect x="-50" y="86" width="22" height="154" fill="#60a5fa" rx="2"/>
+          <rect x="-25" y="19" width="22" height="221" fill="#f5b800" rx="2"/>
+          <rect x="0"   y="91" width="22" height="149" fill="#4ade80" rx="2"/>
+          <text x="-15" y="260" class="axis-label" text-anchor="middle">Gemma 4</text>
+          <text x="-15" y="272" class="axis-label" text-anchor="middle">31B</text>
+        </g>
+
+        <!-- Model 5: GLM 4.7 flash  Butter 41 / Drive 56 / Vend 31 -->
+        <g transform="translate(760,0)">
+          <rect x="-50" y="142" width="22" height="98" fill="#60a5fa" rx="2"/>
+          <rect x="-25" y="106" width="22" height="134" fill="#f5b800" rx="2"/>
+          <rect x="0"   y="166" width="22" height="74" fill="#4ade80" rx="2"/>
+          <text x="-15" y="260" class="axis-label" text-anchor="middle">GLM 4.7</text>
+          <text x="-15" y="272" class="axis-label" text-anchor="middle">flash</text>
+        </g>
+
+        <text x="450" y="20" class="axis-label" text-anchor="middle" style="font-size: 11px; fill: #a8aec0;">Pass Rate % by Model × Benchmark</text>
+      </svg>
+
+      <div class="legend">
+        <div class="item"><span class="swatch" style="background:#60a5fa"></span>Butter-Bench</div>
+        <div class="item"><span class="swatch" style="background:#f5b800"></span>Drive-Thru-Bench</div>
+        <div class="item"><span class="swatch" style="background:#4ade80"></span>Open-Vend</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Two-column: live feed + recent runs -->
+  <div class="grid grid-2 section">
+
+    <div class="card">
+      <div class="card-header">
+        <div class="card-title">Live Run Feed</div>
+        <div class="card-sub">LAST 30 MIN</div>
+      </div>
+      <div class="timeline" style="max-height: 320px; overflow-y: auto;">
+        <div class="event pass">
+          <span class="ts">14:32:18</span>
+          <span class="type">RUN_PASS</span>
+          <span class="msg">openvend · gpt-oss-120b · seed 4421 · $312 profit (8 turns)</span>
+        </div>
+        <div class="event warn">
+          <span class="ts">14:31:54</span>
+          <span class="type">REFUSAL</span>
+          <span class="msg">drivethru · GPT-5.6 luna · case #67 (jailbreak: "I have a gun")</span>
+        </div>
+        <div class="event pass">
+          <span class="ts">14:31:30</span>
+          <span class="type">RUN_PASS</span>
+          <span class="msg">butter · MiniMax M2.5 · 9 turns · structured tool call</span>
+        </div>
+        <div class="event error">
+          <span class="ts">14:30:12</span>
+          <span class="type">BANKRUPTCY</span>
+          <span class="msg">openvend · GLM 4.7 flash · day 6 · cashbox full, no collect</span>
+        </div>
+        <div class="event pass">
+          <span class="ts">14:29:48</span>
+          <span class="type">RUN_PASS</span>
+          <span class="msg">drivethru · Gemma 4 31B · 11 turns · 6/6 orders</span>
+        </div>
+        <div class="event llm">
+          <span class="ts">14:29:11</span>
+          <span class="type">LLM_CALL</span>
+          <span class="msg">openvend · MiniMax M2.5 · 1,247 tokens in / 318 out · $0.0009</span>
+        </div>
+        <div class="event pass">
+          <span class="ts">14:28:42</span>
+          <span class="type">RUN_PASS</span>
+          <span class="msg">butter · Gemma 4 31B · 14 turns</span>
+        </div>
+        <div class="event warn">
+          <span class="ts">14:27:33</span>
+          <span class="type">TIMEOUT_WARN</span>
+          <span class="msg">openvend · GLM 4.7 flash · no tool call for 9m 41s</span>
+        </div>
+        <div class="event system">
+          <span class="ts">14:25:00</span>
+          <span class="type">SEED_ROLL</span>
+          <span class="msg">new batch · seeds 4420–4439 · 60 runs queued</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">
+        <div class="card-title">Recent Run Comparison (5 Models × 1 Seed)</div>
+        <div class="card-sub">SEED 1723 · SAME PROMPTS</div>
+      </div>
+      <table>
+        <thead>
+          <tr>
+            <th>Model</th>
+            <th class="num">Butter turns</th>
+            <th class="num">DT %</th>
+            <th class="num">Vend $</th>
+            <th>Status</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr class="winner">
+            <td class="mono">MiniMax M2.5</td>
+            <td class="num">8</td>
+            <td class="num">94%</td>
+            <td class="num">+$228</td>
+            <td><span class="badge pass">PASS ALL</span></td>
+          </tr>
+          <tr>
+            <td class="mono">gpt-oss-120b</td>
+            <td class="num">14</td>
+            <td class="num">88%</td>
+            <td class="num">+$312</td>
+            <td><span class="badge pass">PASS ALL</span></td>
+          </tr>
+          <tr>
+            <td class="mono">Gemma 4 31B</td>
+            <td class="num">19</td>
+            <td class="num">92%</td>
+            <td class="num">+$108</td>
+            <td><span class="badge pass">PASS ALL</span></td>
+          </tr>
+          <tr>
+            <td class="mono">GLM 4.7 flash</td>
+            <td class="num">42</td>
+            <td class="num">61%</td>
+            <td class="num">−$94</td>
+            <td><span class="badge fail">VEND FAIL</span></td>
+          </tr>
+          <tr>
+            <td class="mono">GPT-5.6 luna</td>
+            <td class="num">67</td>
+            <td class="num">58%</td>
+            <td class="num">−$220</td>
+            <td><span class="badge fail">2 FAILS</span></td>
+          </tr>
+        </tbody>
+      </table>
+
+      <div class="avahi-note">
+        <span class="label">FOR AVAHI</span>
+        The "Recent Run" panel shows the head-to-head on a single seed. Avahi should wire the dashboard so the seed column drives every panel — same seed, all five models, side by side. TPipe's own agent runs would slot into a sixth row once we ship the connector.
+      </div>
+    </div>
+  </div>
+
+  <!-- Failure floor comparison -->
+  <div class="section">
+    <h2>Failure Floor vs Actual — Did the Benchmark Pass?</h2>
+    <div class="card">
+      <table>
+        <thead>
+          <tr>
+            <th>Benchmark</th>
+            <th>Failure Floor (any result above = pass)</th>
+            <th>Best Model</th>
+            <th class="num">Best Score</th>
+            <th>Worst Model</th>
+            <th class="num">Worst Score</th>
+            <th class="num">Pass Rate</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="mono">Butter-Bench</td>
+            <td class="muted">≤ 500 turns + ≤ 5 errors + structured tool call</td>
+            <td class="mono">MiniMax M2.5</td>
+            <td class="num bold">8.4</td>
+            <td class="mono">GPT-5.6 luna</td>
+            <td class="num">62.1</td>
+            <td class="num">71.2%</td>
+          </tr>
+          <tr>
+            <td class="mono">Drive-Thru-Bench</td>
+            <td class="muted">≥ 1 valid order in ≤ 40 turns + no refusal</td>
+            <td class="mono">Gemma 4 31B</td>
+            <td class="num bold">92.1%</td>
+            <td class="mono">GPT-5.6 luna</td>
+            <td class="num">54.3%</td>
+            <td class="num">74.8%</td>
+          </tr>
+          <tr>
+            <td class="mono">Open-Vend</td>
+            <td class="muted">End 28 days w/ bank &gt; $0 (started $500)</td>
+            <td class="mono">gpt-oss-120b</td>
+            <td class="num bold">+$234</td>
+            <td class="mono">GLM 4.7 flash</td>
+            <td class="num">−$312</td>
+            <td class="num">58.3%</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <div class="avahi-note" style="margin-top: 12px;">
+        <span class="label">DESIGN NOTE</span>
+        Per the General Concepts doc: "Any result above the failure floor is a pass even if the result is a poor showing." The failure floor row needs to be visible on EVERY benchmark detail page so reviewers don't conflate "above the floor" with "competitive." TPipe's own runs will likely be in the 95th+ percentile on every benchmark; the floor-vs-actual gap is the headline.
+      </div>
+    </div>
+  </div>
+
+</div>
+</body>
+</html>

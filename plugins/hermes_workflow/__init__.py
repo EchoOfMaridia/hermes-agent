@@ -1,0 +1,315 @@
+"""hermes_workflow plugin.
+
+Re-exports the DSL surface so workflow scripts can do::
+
+    from plugins.hermes_workflow import step, parallel, gather, workflow, ...
+
+The ``register(ctx)`` function below is the plugin entrypoint called by
+hermes's plugin loader at startup. It wires the four surfaces
+(CLI subcommands, slash commands, model tool, gateway reaction handler)
+plus the visibility layer that streams workflow progress through the
+gateway's existing StreamEvent pipeline.
+
+Discovery path: ``plugins/hermes_workflow/`` is the bundled location.
+Users copy elsewhere under ``~/.hermes/plugins/`` to override.
+
+Spec: ``/home/cage/.hermes/plans/hermes-workflow-plugin-spec.md``
+"""
+
+from plugins.hermes_workflow.dsl import (
+    # Types
+    Evidence,
+    RunContext,
+    RunState,
+    StepSpec,
+    StepState,
+    Verifier,
+    VerifierResult,
+    # Errors
+    WorkflowError,
+    WorkflowValidationError,
+    CapExceeded,
+    MaxConcurrentReached,
+    MaxTotalReached,
+    VerifierMismatch,
+    StructuredOutputError,
+    # Primitives
+    step,
+    parallel,
+    gather,
+    workflow,
+)
+
+__all__ = [
+    "Evidence",
+    "RunContext",
+    "RunState",
+    "StepSpec",
+    "StepState",
+    "Verifier",
+    "VerifierResult",
+    "WorkflowError",
+    "WorkflowValidationError",
+    "CapExceeded",
+    "MaxConcurrentReached",
+    "MaxTotalReached",
+    "VerifierMismatch",
+    "StructuredOutputError",
+    "step",
+    "parallel",
+    "gather",
+    "workflow",
+    "register",
+]
+
+
+# ---------------------------------------------------------------------------
+# Plugin entrypoint. Hermes's plugin loader calls register(ctx) at startup.
+# We lazy-import the entrypoint logic so that pure-import of this package
+# (e.g., from workflow scripts that import the DSL) does NOT touch the
+# hermes runtime or its plugin loader.
+# ---------------------------------------------------------------------------
+
+# ----------------------------------------------------------------------------
+# Module-level seam — the REST layer (hermes_cli/web_server.py) needs
+# to talk to the SAME WorkflowRuntime the plugin registered so that
+# workflow events flow through the desktop_event_bridge that's wired
+# on it. Without this seam the REST path built a fresh runtime with
+# an unwired dispatcher and every REST-launched run was invisible to
+# the Hermes desktop's Workflows panel (Pitfall #57 regression).
+# ----------------------------------------------------------------------------
+_active_runtime = None
+
+
+def get_active_runtime():
+    """Return the WorkflowRuntime the plugin's register() built, or None
+    if the plugin was never registered into a context (e.g. when
+    `_workflow_runtime_singleton` runs in a process where the plugin
+    loader hasn't been invoked yet — the `hermes serve` headless
+    backend on a fresh boot, for instance)."""
+    return _active_runtime
+
+
+def set_active_runtime(runtime) -> None:
+    """Mark this runtime as the one the plugin's register() built so the
+    REST layer can pick it up instead of constructing a parallel
+    instance whose dispatcher chain is unwired."""
+    global _active_runtime
+    _active_runtime = runtime
+
+
+def register(ctx) -> None:
+    """Wire the workflow plugin into hermes's plugin context.
+
+    Args:
+        ctx: a PluginContext facade exposing register_cli_command,
+             register_command, register_tool, register_hook, and
+             inject_message. See hermes_cli/plugins.py for the full
+             surface.
+    """
+    import logging
+    from plugins.hermes_workflow.cli import register_cli
+    from plugins.hermes_workflow.slash import build_slash_handlers
+    from plugins.hermes_workflow.tool import (
+        build_tool_schema,
+        build_tool_handler,
+    )
+    from plugins.hermes_workflow.gateway_handler import (
+        build_gateway_handler,
+    )
+    from plugins.hermes_workflow.runtime_factory import build_runtime
+    from plugins.hermes_workflow.script_author import ScriptAuthor
+    from plugins.hermes_workflow.gateway_late_wire import (
+        build_late_wire_callback,
+    )
+    from plugins.hermes_workflow.fallback_dispatch import (
+        FallbackDispatchSink,
+        attach_fallback_sink,
+        drain_sink_to_ctx,
+    )
+
+    _log = logging.getLogger("hermes_workflow")
+    manifest = getattr(ctx, "manifest", None)
+    plugin_name = manifest.name if manifest else "hermes_workflow"
+    _log.info("registering hermes_workflow plugin (name=%s)", plugin_name)
+
+    # Capture ctx.llm so runtime_factory.build_runtime can wire the
+    # in-process PluginLlmBridge when the plugin is loaded inside an
+    # active Hermes session.
+    from plugins.hermes_workflow.runtime_factory import _capture_plugin_llm
+    _capture_plugin_llm(getattr(ctx, "llm", None))
+
+    # The runtime singleton lives for the lifetime of the hermes process.
+    runtime = build_runtime()
+
+    # ScriptAuthor: v0.2.0 ad-hoc mode. Uses ctx.llm (PluginLlm facade)
+    # to call the host's structured-output LLM with a JSON Schema that
+    # produces a valid workflow script.
+    script_author = ScriptAuthor(llm=ctx.llm)
+
+    # Capture into ctx so tests and downstream surfaces can introspect
+    # the wiring. MockPluginContext records these for assertions; the
+    # production PluginContext accepts arbitrary attribute writes.
+    ctx.runtime = runtime
+    ctx.script_author = script_author
+
+    # Module-level seam: the REST layer (hermes_cli/web_server.py)
+    # reads this so /api/workflows/run can submit on the SAME runtime
+    # the desktop_event_bridge is registered on. Without it, the
+    # singleton runtime used by the REST path has an unwired
+    # dispatcher and the Hermes desktop's Workflows panel never
+    # populates (see test_rest_run_emits_desktop_wire_envelopes).
+    set_active_runtime(runtime)
+
+    # Attach a FallbackDispatchSink so workflow events reach the chat
+    # surface via ctx.inject_message even when the gateway dispatcher
+    # isn't wired (hermes-desktop default). attach_fallback_sink is
+    # idempotent — if a real gateway dispatcher is already wired it
+    # returns None and we skip the sink step.
+    fallback_sink: FallbackDispatchSink | None = None
+    try:
+        fallback_sink = attach_fallback_sink(runtime)
+    except Exception as e:
+        _log.debug("attach_fallback_sink failed: %s", e)
+    if fallback_sink is not None:
+        ctx._fallback_sink = fallback_sink
+
+    # Register the desktop wire-format bridge so the Hermes desktop
+    # Workflows panel populates from real workflow runs (Pitfall #57
+    # fix, shipped 2026-07-19). The bridge wraps the existing dispatcher
+    # so the gateway pipeline AND the fallback sink keep working AND
+    # the desktop JSON-RPC envelopes are emitted in the same dispatch.
+    try:
+        from plugins.hermes_workflow.desktop_event_bridge import get_bridge
+        get_bridge().register(runtime)
+    except Exception as e:
+        _log.debug("desktop_event_bridge register failed: %s", e)
+
+    # Surface 1: CLI subcommands.
+    def _cli_default_handler(args):
+        import asyncio as _aio
+        from plugins.hermes_workflow.cli import _dispatch
+        if getattr(args, "workflow_command", None) is None:
+            # No subcommand: print help.
+            import argparse
+            parser = argparse.ArgumentParser(prog="hermes workflow",
+                description="hermes_workflow: script-driven agent orchestration.")
+            parser.print_help()
+            return 0
+        return _dispatch(args)
+
+    ctx.register_cli_command(
+        name="workflow",
+        help="Run, inspect, save, replay, and cancel workflow scripts.",
+        setup_fn=register_cli,
+        handler_fn=_cli_default_handler,
+        description=(
+            "hermes_workflow: script-driven agent orchestration. "
+            "Subcommands: run, list, inspect, status, replay, "
+            "snapshot, cancel."
+        ),
+    )
+
+    # Surface 2: Slash commands (CLI + gateway in-session).
+    # Thread script_author so /workflow create <intent> can route to the
+    # LLM-driven ad-hoc path (mirrors the gateway handler's contract
+    # in gateway_handler.py).
+    slash_handlers = build_slash_handlers(runtime, script_author=script_author)
+    for cmd_name, cmd_def in slash_handlers.items():
+        try:
+            ctx.register_command(
+                name=cmd_name,
+                handler=cmd_def["handler"],
+                description=cmd_def["description"],
+                args_hint=cmd_def.get("args_hint", ""),
+            )
+        except Exception as e:
+            _log.warning("could not register slash command %s: %s",
+                          cmd_name, e)
+
+    # Surface 3: Model tool. Available to the LLM agent.
+    try:
+        ctx.register_tool(
+            name="call_workflow",
+            toolset="workflow",
+            schema=build_tool_schema(),
+            handler=build_tool_handler(runtime, script_author=script_author),
+            is_async=True,
+            description=(
+                "Invoke a workflow script by name. Modes: 'library' to "
+                "call a saved workflow, 'ad-hoc' to generate one from a "
+                "natural-language intent. Returns a run_id; the workflow "
+                "runs in the background."
+            ),
+            emoji="🧬",
+        )
+    except Exception as e:
+        _log.warning("could not register tool call_workflow: %s", e)
+
+    # Surface 4: Gateway reaction handler.
+    handler = build_gateway_handler(runtime, script_author=script_author)
+    try:
+        ctx.register_hook("pre_gateway_dispatch", _make_hook(handler))
+        _log.info("registered pre_gateway_dispatch hook")
+    except AttributeError:
+        _log.warning(
+            "PluginContext does not expose register_hook; "
+            "gateway auto-invoke via slash command only"
+        )
+    except Exception as e:
+        _log.warning("could not register gateway hook: %s", e)
+
+    # Wire the runtime's dispatcher into the gateway's StreamEvent
+    # pipeline so workflow progress flows live to TUI / desktop /
+    # Discord / Telegram / iMessage.
+    try:
+        from gateway.stream_dispatch import GatewayEventDispatcher
+    except ImportError:
+        _log.info("gateway module not importable; live streaming disabled")
+    else:
+        dispatcher = _get_runtime_dispatcher()
+        if dispatcher is not None:
+            runtime.set_dispatcher(dispatcher.dispatch)
+            _log.info("workflow plugin wired into gateway StreamEvent pipeline")
+        else:
+            # Late-binding: the gateway runner may not be active yet.
+            # Register hooks that re-check on every opportunity.
+            late_wire = build_late_wire_callback(runtime)
+            try:
+                ctx.register_hook("on_session_start", late_wire)
+                _log.info("registered on_session_start late-wire hook")
+            except Exception:
+                pass
+            try:
+                # Reuse the existing pre_gateway_dispatch hook to also
+                # try the late-wire check before the message dispatches.
+                # We compose the existing hook with the late-wire check.
+                original_handler = handler if 'handler' in dir() else None
+                def _composed(event, **kwargs):
+                    late_wire()
+                    if original_handler is not None:
+                        return original_handler(event, kwargs)
+                    return None
+                # Skip the late-wire pre_gateway_dispatch binding because
+                # it would replace the gateway_handler already registered.
+                # The on_session_start hook is sufficient.
+            except Exception as e:
+                _log.debug("late-wire composite failed: %s", e)
+
+    _log.info("hermes_workflow plugin registered successfully")
+
+
+def _make_hook(handler):
+    """Wrap a gateway handler as a hermes pre_gateway_dispatch hook."""
+    def hook(event, **kwargs):
+        return handler(event, kwargs)
+    return hook
+
+
+def _get_runtime_dispatcher():
+    """Locate the active GatewayEventDispatcher, if one exists."""
+    try:
+        from hermes_cli.gateway import get_active_dispatcher
+        return get_active_dispatcher()
+    except Exception:
+        return None

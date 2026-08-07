@@ -1,0 +1,29 @@
+name: hermes_workflow
+version: 0.1.0
+description: "First-party Hermes workflow plugin. User-defined Python scripts that control agent orchestration. Session-local, asyncio-based, deterministic journal. Replaces/supplements kanban for projects that benefit from script-driven control."
+author: NousResearch
+kind: standalone
+platforms:
+  - linux
+  - macos
+  - windows
+
+surfaces:
+  cli:
+    command_group: workflow
+    description: "Create, run, save, inspect, replay, and cancel workflows."
+  slash_command:
+    command: workflow
+    description: "Inline workflow authoring and invocation from chat surfaces."
+  model_tool:
+    name: call_workflow
+    description: "Invoke a workflow by name from any agent context."
+    input_schema:
+      name: string
+      inputs: object
+      mode: string
+  gateway_handler:
+    patterns:
+      - "workflow: <intent>"
+      - "/workflow <args>"
+    description: "Auto-invoke workflows from gateway messages."

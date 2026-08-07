@@ -1,0 +1,324 @@
+import { describe, expect, it } from 'vitest'
+
+import {
+  desktopSkinSlashCompletions,
+  desktopSlashDescription,
+  desktopSlashUnavailableMessage,
+  filterDesktopCommandsCatalog,
+  isDesktopDollarSkillCommand,
+  isDesktopSlashCommand,
+  isDesktopSlashSuggestion,
+  isModelPickerCommand,
+  isPickerCommand,
+  parseDollarSkillRefs,
+  rewriteDollarPrefixToSlash,
+  resolveDesktopCommand
+} from './desktop-slash-commands'
+
+describe('desktop slash command curation', () => {
+  it('keeps core desktop chat commands in suggestions', () => {
+    expect(isDesktopSlashSuggestion('/new')).toBe(true)
+    expect(isDesktopSlashSuggestion('/branch')).toBe(true)
+    expect(isDesktopSlashSuggestion('/skin')).toBe(true)
+    expect(isDesktopSlashSuggestion('/usage')).toBe(true)
+    expect(isDesktopSlashSuggestion('/version')).toBe(true)
+    expect(isDesktopSlashSuggestion('/yolo')).toBe(true)
+    expect(isDesktopSlashCommand('/yolo')).toBe(true)
+  })
+
+  it('surfaces skill and quick commands (extensions) in suggestions and lets them run', () => {
+    expect(isDesktopSlashSuggestion('/my-skill')).toBe(true)
+    expect(isDesktopSlashSuggestion('/gif-search')).toBe(true)
+    expect(isDesktopSlashCommand('/my-skill')).toBe(true)
+  })
+
+  it('hides terminal, messaging, and dedicated-UI commands from suggestions', () => {
+    expect(isDesktopSlashSuggestion('/clear')).toBe(false)
+    expect(isDesktopSlashSuggestion('/compact')).toBe(false)
+    expect(isDesktopSlashSuggestion('/redraw')).toBe(false)
+    expect(isDesktopSlashSuggestion('/approve')).toBe(false)
+    expect(isDesktopSlashSuggestion('/model')).toBe(false)
+    // /skills, /plugins, /image, /reload-mcp, /reload-skills, /platforms,
+    // /logs, /history, /reload all used to be unavailable on the
+    // desktop — typed `/reload-mcp` returned "only available in the terminal
+    // interface" stub. They're plain `slash.exec` round-trips that the
+    // gateway handles, so they should surface in the popover the same way
+    // `/agents` and `/tools` do.
+    expect(isDesktopSlashSuggestion('/skills')).toBe(true)
+    expect(isDesktopSlashSuggestion('/plugins')).toBe(true)
+    expect(isDesktopSlashSuggestion('/image')).toBe(true)
+    expect(isDesktopSlashSuggestion('/reload-mcp')).toBe(true)
+    expect(isDesktopSlashSuggestion('/reload-skills')).toBe(true)
+    expect(isDesktopSlashSuggestion('/platforms')).toBe(true)
+    expect(isDesktopSlashSuggestion('/logs')).toBe(true)
+    expect(isDesktopSlashSuggestion('/history')).toBe(true)
+    expect(isDesktopSlashSuggestion('/reload')).toBe(true)
+    // /voice used to be unavailable:advanced (no desktop surface). It now
+    // has an action handler that drives voice.toggle on the gateway, so it
+    // surfaces in the popover like /personality and /reasoning.
+    expect(isDesktopSlashSuggestion('/voice')).toBe(true)
+    expect(isDesktopSlashSuggestion('/curator')).toBe(false)
+  })
+
+  it('surfaces /tools, /save, and /personality on the desktop', () => {
+    expect(isDesktopSlashSuggestion('/tools')).toBe(true)
+    expect(isDesktopSlashSuggestion('/save')).toBe(true)
+    expect(isDesktopSlashSuggestion('/personality')).toBe(true)
+    expect(isDesktopSlashCommand('/tools')).toBe(true)
+    expect(isDesktopSlashCommand('/save')).toBe(true)
+    expect(isDesktopSlashCommand('/personality')).toBe(true)
+    expect(desktopSlashUnavailableMessage('/tools')).toBeNull()
+    expect(desktopSlashUnavailableMessage('/save')).toBeNull()
+    expect(desktopSlashUnavailableMessage('/personality')).toBeNull()
+  })
+
+  it('treats /browser as an executable action command (local-gateway connect)', () => {
+    // /browser used to be terminal-only; it now resolves to a desktop action
+    // handler that routes browser.manage RPC when the gateway is local.
+    expect(isDesktopSlashCommand('/browser')).toBe(true)
+    expect(isDesktopSlashSuggestion('/browser')).toBe(true)
+    expect(desktopSlashUnavailableMessage('/browser')).toBeNull()
+    expect(resolveDesktopCommand('/browser')?.surface).toEqual({ kind: 'action', action: 'browser' })
+    // Bare /browser expands to its sub-action options in the popover.
+    expect(resolveDesktopCommand('/browser')?.args).toBe(true)
+  })
+
+  it('routes /compress to the desktop action handler (bypasses slash worker)', () => {
+    // Regression: /compress used to resolve to surface: exec(), which routed
+    // through slash_worker → HermesCLI(process_command) and failed the
+    // "conversation_history < 4" guard because the worker never loaded
+    // history (it constructed HermesCLI(resume=...) without cli.run() so
+    // self.conversation_history stayed empty). Now it routes to the
+    // session.compress RPC like the TUI does.
+    expect(resolveDesktopCommand('/compress')?.surface).toEqual({ kind: 'action', action: 'compress' })
+    expect(isDesktopSlashCommand('/compress')).toBe(true)
+    expect(isDesktopSlashSuggestion('/compress')).toBe(true)
+    expect(desktopSlashUnavailableMessage('/compress')).toBeNull()
+    // /compress takes optional arg ("here [N]" boundary, focus topic, etc.).
+    expect(resolveDesktopCommand('/compress')?.args).toBe(true)
+  })
+
+  it('exposes /reasoning, /fast, /busy, /verbose, and /voice as action commands (parity with the TUI)', () => {
+    // These commands used to be unavailable on the desktop (no surface).
+    // They now have action handlers that drive config.get / config.set /
+    // voice.toggle on the gateway, mirroring ui-tui/.../slash/commands/session.ts.
+    for (const command of ['/reasoning', '/fast', '/busy', '/verbose', '/voice']) {
+      expect(isDesktopSlashCommand(command)).toBe(true)
+      expect(isDesktopSlashSuggestion(command)).toBe(true)
+      expect(desktopSlashUnavailableMessage(command)).toBeNull()
+      expect(resolveDesktopCommand(command)?.surface?.kind).toBe('action')
+      // Each takes an inline arg (status|set|on|off|…) so the popover
+      // expands to the two-step picker rather than committing immediately.
+      expect(resolveDesktopCommand(command)?.args).toBe(true)
+    }
+  })
+
+  it('allows aliases to execute without cluttering the popover', () => {
+    expect(isDesktopSlashSuggestion('/reset')).toBe(false)
+    expect(isDesktopSlashCommand('/reset')).toBe(true)
+  })
+
+  it('filters built-in catalog noise but keeps skill / quick-command extensions', () => {
+    const filtered = filterDesktopCommandsCatalog({
+      categories: [
+        {
+          name: 'Session',
+          pairs: [
+            ['/new', 'Start a new session'],
+            ['/clear', 'Clear terminal screen']
+          ]
+        },
+        {
+          name: 'User commands',
+          pairs: [['/ship-it', 'Run release checklist']]
+        }
+      ],
+      pairs: [
+        ['/new', 'Start a new session'],
+        ['/model', 'Switch model'],
+        ['/ship-it', 'Run release checklist']
+      ],
+      skill_count: 2
+    })
+
+    expect(filtered.categories).toEqual([
+      { name: 'Session', pairs: [['/new', 'Start a new desktop chat']] },
+      { name: 'User commands', pairs: [['/ship-it', 'Run release checklist']] }
+    ])
+    expect(filtered.pairs).toEqual([
+      ['/new', 'Start a new desktop chat'],
+      ['/ship-it', 'Run release checklist']
+    ])
+    // skill_count is recomputed from the filtered output (only /ship-it is an
+    // extension command — /new is a built-in) so the /help footer matches what
+    // the user actually sees rather than echoing the unfiltered backend total.
+    expect(filtered.skill_count).toBe(1)
+  })
+
+  it('recomputes skill_count to reflect only extensions surfaced on desktop', () => {
+    const filtered = filterDesktopCommandsCatalog({
+      pairs: [
+        ['/new', 'Start a new session'],
+        ['/clear', 'Clear terminal screen'],
+        ['/gif-search', 'Search for a gif'],
+        ['/ship-it', 'Run release checklist']
+      ],
+      skill_count: 12
+    })
+
+    expect(filtered.pairs?.map(([cmd]) => cmd)).toEqual(['/new', '/gif-search', '/ship-it'])
+    expect(filtered.skill_count).toBe(2)
+  })
+
+  it('uses desktop-specific labels for commands with different UI behavior', () => {
+    expect(desktopSlashDescription('/branch', 'Branch the current session')).toBe(
+      'Branch the latest message into a new chat'
+    )
+    expect(desktopSlashDescription('/skin', 'Show or change the display skin/theme')).toBe(
+      'Switch desktop theme or cycle to the next one'
+    )
+  })
+
+  it('builds /skin completions from desktop themes', () => {
+    const completions = desktopSkinSlashCompletions(
+      [
+        { name: 'mono', label: 'Mono', description: 'Clean grayscale' },
+        { name: 'midnight', label: 'Midnight', description: 'Deep blue' },
+        { name: 'slate', label: 'Slate', description: 'Cool slate blue' }
+      ],
+      'mono',
+      'm'
+    )
+
+    expect(completions).toEqual([
+      {
+        text: '/skin mono',
+        display: '/skin mono',
+        meta: 'Mono (current) - Clean grayscale'
+      },
+      {
+        text: '/skin midnight',
+        display: '/skin midnight',
+        meta: 'Midnight - Deep blue'
+      }
+    ])
+  })
+
+  it('explains known commands that desktop owns elsewhere', () => {
+    expect(desktopSlashUnavailableMessage('/model sonnet')).toContain('model picker')
+    // /skills is now an exec() command — typing it round-trips through the
+    // gateway's slash worker instead of getting an "unavailable" stub. The
+    // desktop sidebar Skills UI is one path; the slash command is another.
+    expect(desktopSlashUnavailableMessage('/skills')).toBeNull()
+    expect(desktopSlashUnavailableMessage('/clear')).toContain('terminal interface')
+  })
+
+  it('flags /model as a picker-owned command so the desktop opens the overlay', () => {
+    expect(isModelPickerCommand('/model')).toBe(true)
+    expect(isModelPickerCommand('/model sonnet')).toBe(true)
+    expect(isModelPickerCommand('/new')).toBe(false)
+    expect(isModelPickerCommand('/skills')).toBe(false)
+  })
+
+  it('gives /resume (and its aliases) a first-class session picker surface', () => {
+    expect(isPickerCommand('/resume', 'session')).toBe(true)
+    expect(isPickerCommand('/sessions', 'session')).toBe(true)
+    expect(isPickerCommand('/switch', 'session')).toBe(true)
+    // Unlike /model, /resume shows in the popover; its aliases stay hidden.
+    expect(isDesktopSlashSuggestion('/resume')).toBe(true)
+    expect(isDesktopSlashSuggestion('/sessions')).toBe(false)
+    expect(isDesktopSlashCommand('/switch')).toBe(true)
+    // The session picker is distinct from the model picker.
+    expect(isModelPickerCommand('/resume')).toBe(false)
+  })
+
+  it('resolves commands and aliases to their declared surface', () => {
+    expect(resolveDesktopCommand('/new')?.surface).toEqual({ kind: 'action', action: 'new' })
+    expect(resolveDesktopCommand('/reset')?.surface).toEqual({ kind: 'action', action: 'new' })
+    expect(resolveDesktopCommand('/resume')?.surface).toEqual({ kind: 'picker', picker: 'session' })
+    expect(resolveDesktopCommand('/usage')?.surface).toEqual({ kind: 'exec' })
+    expect(resolveDesktopCommand('/clear')?.surface).toEqual({ kind: 'unavailable', reason: 'terminal' })
+    // Skill / quick commands aren't in the registry.
+    expect(resolveDesktopCommand('/gif-search')).toBeNull()
+  })
+})
+
+// ── $dollar-prefixed skill/bundle invocation on the desktop ──
+//
+// The desktop slash palette surfaces `$` completions for skills and
+// bundles, but never for built-in commands. The dispatch layer rewrites
+// a position-0 `$chain` to the `/chain` form so the existing
+// `slash.exec` → `command.dispatch` path carries the rest.
+
+describe('parseDollarSkillRefs', () => {
+  it('returns the canonical /slug form for every $token in order', () => {
+    expect(parseDollarSkillRefs('$skill-a $skill-b do XYZ')).toEqual([
+      '/skill-a',
+      '/skill-b'
+    ])
+  })
+
+  it('dedupes case-insensitively', () => {
+    expect(parseDollarSkillRefs('$skill-a $SKILL-A run')).toEqual([
+      '/skill-a'
+    ])
+  })
+
+  it('returns an empty array when no $tokens are present', () => {
+    expect(parseDollarSkillRefs('just a plain prompt with no refs')).toEqual([])
+    expect(parseDollarSkillRefs('')).toEqual([])
+  })
+
+  it('does not match env-var-shaped tokens', () => {
+    // `$PATH` is uppercase; skill names are normalized to lowercase.
+    expect(parseDollarSkillRefs('echo $PATH then $HOME')).toEqual([])
+  })
+})
+
+describe('isDesktopDollarSkillCommand', () => {
+  it('accepts a $skill-name token as a recognized extension command', () => {
+    // The desktop routes skill/bundle refs through the same backend
+    // path as `/my-skill` — it is an extension command the desktop
+    // owns at the dispatch layer. The exact registry check happens at
+    // the gateway dispatch layer; this predicate only validates the
+    // syntactic shape.
+    expect(isDesktopDollarSkillCommand('$my-skill')).toBe(true)
+    expect(isDesktopDollarSkillCommand('$my-bundle')).toBe(true)
+  })
+
+  it('rejects env-var-shaped tokens', () => {
+    expect(isDesktopDollarSkillCommand('$PATH')).toBe(false)
+  })
+
+  it('rejects tokens that are not lowercase-led', () => {
+    // `$Model` starts with uppercase; skills are always normalized to
+    // lowercase so an uppercase-led `$token` is not a valid skill shape.
+    expect(isDesktopDollarSkillCommand('$Model')).toBe(false)
+  })
+
+  it('rejects non-$ commands', () => {
+    expect(isDesktopDollarSkillCommand('/my-skill')).toBe(false)
+    expect(isDesktopDollarSkillCommand('my-skill')).toBe(false)
+  })
+})
+
+describe('rewriteDollarPrefixToSlash', () => {
+  it('rewrites `$a $b do XYZ` at position 0 to `/a /b do XYZ`', () => {
+    expect(rewriteDollarPrefixToSlash('$skill-a $skill-b do the thing')).toBe(
+      '/skill-a /skill-b do the thing'
+    )
+  })
+
+  it('rewrites a single `$a do XYZ` to `/a do XYZ`', () => {
+    expect(rewriteDollarPrefixToSlash('$skill-a do the thing')).toBe(
+      '/skill-a do the thing'
+    )
+  })
+
+  it('returns input unchanged when no $tokens are at position 0', () => {
+    expect(rewriteDollarPrefixToSlash('just plain text')).toBe('just plain text')
+    expect(rewriteDollarPrefixToSlash('please run $skill-a inline')).toBe(
+      'please run $skill-a inline'
+    )
+  })
+})
