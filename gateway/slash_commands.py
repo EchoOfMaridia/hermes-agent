@@ -4676,6 +4676,18 @@ class GatewaySlashCommandsMixin:
             removed = result.get("removed", [])  # [{"name", "description"}, ...]
             total = result.get("total", 0)
 
+            # Also reload macros on /reload-skills so operators don't need a
+            # separate command when they tweak ``~/.hermes/macros.yaml``.
+            # Same directory, same hand-off surface, one gesture.
+            try:
+                from agent.macros import reload_macros
+
+                macros_map = await loop.run_in_executor(None, reload_macros)
+                macros_total = len(macros_map)
+            except Exception as macros_exc:
+                logger.warning("Macros reload failed: %s", macros_exc)
+                macros_total = 0
+
             # Let each connected adapter refresh any platform-side state
             # that cached the skill list at startup. Today that's the
             # Discord /skill autocomplete (registered once per connect);
@@ -4702,6 +4714,7 @@ class GatewaySlashCommandsMixin:
             if not added and not removed:
                 lines.append(t("gateway.reload_skills.no_new"))
                 lines.append(t("gateway.reload_skills.total", count=total))
+                lines.append(t("gateway.reload_skills.macros_total", count=macros_total))
                 return "\n".join(lines)
 
             def _fmt_line(item: dict) -> str:
@@ -4720,6 +4733,7 @@ class GatewaySlashCommandsMixin:
                 for item in removed:
                     lines.append(_fmt_line(item))
             lines.append(t("gateway.reload_skills.total", count=total))
+            lines.append(t("gateway.reload_skills.macros_total", count=macros_total))
 
             # Queue the one-shot note for the next user turn in this session.
             # Format matches how the system prompt renders pre-existing

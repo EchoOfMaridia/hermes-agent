@@ -20,6 +20,7 @@ import sys
 import time
 import types
 import uuid
+from typing import Any, Dict, List
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -1590,6 +1591,160 @@ class TestChatCompletionsEndpoint:
         assert kwargs["requested_model"] == "MiniMax-M3"
         assert kwargs["requested_provider"] == "minimax"
         assert kwargs["model_options"] == model_options
+
+    @pytest.mark.asyncio
+    async def test_session_chat_stream_forwards_subagent_events(self, adapter):
+        """Pinned 2026-08-08 (deleg_3e3dc250 / deleg_a42b2ffd in
+        session 20260808_165817_7fbed1): the desktop session chat stream
+        MUST forward ``subagent.*`` events emitted by
+        ``tools.delegate_tool._build_child_progress_callback`` so the
+        Spawn-tree panel / status stack reflects background subagents.
+
+        Pre-fix bug: ``_handle_session_chat_stream._tool_progress``
+        (gateway/platforms/api_server.py ~ line 3497) only handled
+        ``reasoning.available``, ``tool.started``, ``tool.completed``,
+        and ``tool.failed`` — every ``subagent.start`` /
+        ``subagent.progress`` / ``subagent.complete`` /
+        ``subagent.spawn_requested`` event was silently dropped before
+        it could be enqueued for the SSE stream the desktop renderer
+        consumes (``use-message-stream.ts`` has explicit
+        ``SUBAGENT_EVENT_TYPES`` handling — the events simply never
+        arrived). This caused Hermes Desktop to "drop" async
+        subagents: ``delegate_task(background=true)`` dispatched the
+        worker, the worker ran, but the desktop never showed the
+        spawn / progress / completion in the Subagents panel.
+
+        Without forwarding, the panel can never show "running" state
+        for a subagent that doesn't fit on the parent's
+        tool.started stream (the parent turn has long since finished
+        by the time the async worker emits its events).
+        """
+        app = _create_app(adapter)
+
+        # The test mimics the production race: the parent turn fires
+        # its tool_progress_callback while the agent is still running,
+        # then the agent finishes. Subagent events fired mid-agent-run
+        # must reach the SSE body — that's the path that survives in
+        # the wild (background subagents emit while the worker is
+        # alive on its own thread; the parent's SSE writer is
+        # concurrently draining its queue).
+        fired_during_run: List[str] = []
+
+        async def fake_run_agent(**kwargs):
+            cb = kwargs.get("tool_progress_callback")
+            assert cb is not None, (
+                "test setup failed: tool_progress_callback was not "
+                "passed to _run_agent"
+            )
+            subagent_payload = {
+                "subagent_id": "deleg_3e3dc250",
+                "parent_id": None,
+                "goal": "Research how Amazon Nova models count tokens",
+                "model": "MiniMax-M3",
+                "status": "running",
+                "task_count": 1,
+                "task_index": 0,
+                "child_session_id": "171352_cd4a9c",
+                "toolsets": ["web", "terminal", "file"],
+            }
+            # Fire every subagent event the desktop listens for,
+            # WHILE the parent turn is still active — same race
+            # window the live bug exploits.
+            for et in (
+                "subagent.spawn_requested",
+                "subagent.start",
+                "subagent.progress",
+                "subagent.complete",
+            ):
+                cb(
+                    et,
+                    None,
+                    "Research Nova tokens",
+                    None,
+                    **{**subagent_payload, "status": (
+                        "completed" if et == "subagent.complete"
+                        else "running"
+                    ), "summary": "Found it" if et == "subagent.complete" else None},
+                )
+                fired_during_run.append(et)
+            return (
+                {"final_response": "ok", "messages": [], "api_calls": 1},
+                {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+            )
+
+        async with TestClient(TestServer(app)) as cli:
+            with (
+                patch.object(
+                    adapter,
+                    "_get_existing_session_or_404",
+                    return_value=({"id": "s1"}, None),
+                ),
+                patch.object(
+                    adapter, "_conversation_history_for_session", return_value=[]
+                ),
+                patch.object(adapter, "_run_agent", side_effect=fake_run_agent),
+            ):
+                resp = await cli.post(
+                    "/api/sessions/s1/chat/stream",
+                    json={
+                        "message": "hi",
+                        "model": "MiniMax-M3",
+                        "provider": "minimax",
+                    },
+                )
+                assert resp.status == 200
+                body = await resp.text()
+
+        # Sanity: the test actually fired all 4 events mid-run.
+        assert fired_during_run == [
+            "subagent.spawn_requested",
+            "subagent.start",
+            "subagent.progress",
+            "subagent.complete",
+        ], (
+            "test setup error: events were not fired mid-run; "
+            "the bug can't be reproduced without them"
+        )
+
+        # Critical assertion: every subagent.* event must reach the SSE
+        # body as a discrete event line. Pre-fix the events were
+        # silently dropped by the dispatch in _tool_progress and the
+        # desktop renderer never saw them.
+        for et in (
+            "subagent.spawn_requested",
+            "subagent.start",
+            "subagent.progress",
+            "subagent.complete",
+        ):
+            assert f"event: {et}" in body, (
+                f"desktop chat stream dropped {et} event — the Subagents "
+                f"panel cannot show background subagents without it. "
+                f"Body preview:\n{body[:800]}"
+            )
+
+        # The payload must round-trip the identity fields the panel
+        # uses to upsertSubagent() — subagent_id, goal, status.
+        assert '"subagent_id": "deleg_3e3dc250"' in body, (
+            "subagent.start payload lost subagent_id — the panel can't "
+            "key subagent records without it"
+        )
+        assert '"status": "running"' in body, (
+            "subagent payload lost status field — the panel can't show "
+            "the running indicator"
+        )
+        assert '"status": "completed"' in body, (
+            "subagent.complete payload lost status — the panel can't "
+            "transition to terminal state"
+        )
+
+        # Diagnostic dump: show every SSE event line so the failure
+        # mode is obvious when this regresses.
+        for line in body.splitlines():
+            if line.startswith("event:") or line.startswith("data:"):
+                if line.startswith("data:"):
+                    print(f"  {line[:200]}")
+                else:
+                    print(f"  {line}")
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(

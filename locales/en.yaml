@@ -237,6 +237,7 @@ gateway:
     header:                "🔄 **Skills Reloaded**\n"
     no_new:                "No new skills detected."
     total:                 "\n📚 {count} skill(s) available"
+    macros_total:          "\n🧩 {count} macro(s) available"
     added_header:          "➕ **Added Skills:**"
     removed_header:        "➖ **Removed Skills:**"
     item_with_desc:        "    - {name}: {desc}"

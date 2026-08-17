@@ -961,6 +961,43 @@ contributor skill PRs.
 
 ---
 
+## Macros
+
+Macros are user-defined string replacements that fire on `[key]` tokens
+in user prompts before the prompt reaches the LLM. The mapping is loaded
+from `~/.hermes/macros.yaml` at startup, on every gateway start, and on
+the existing `/reload-skills` slash command (no separate reload gesture
+exists).
+
+A minimal `macros.yaml`:
+
+```yaml
+signup: "https://example.com/signup"
+today: "2026-08-15"
+```
+
+A user prompt `Use [signup] for our launch today [today].` is rewritten
+to `Use https://example.com/signup for our launch today 2026-08-15.`
+before reaching the model. Expansion is single-pass — values containing
+their own `[other]` tokens are inlined literally, never re-expanded.
+Undefined `[name]` tokens are left as literal text. Non-string values
+raise `ValueError` at load time; missing or malformed `macros.yaml` is
+logged at WARNING and treated as empty so the agent still works without
+macros.
+
+The loader, expansion engine, and reload API live in `agent/macros.py`.
+The single chokepoint is `agent/conversation_loop.run_conversation`,
+which calls `expand_macros(user_message, get_macros())` immediately after
+the MoA-decoder block and before `build_turn_context`. Every entry point
+(CLI, gateway, TUI, Desktop, oneshot) routes through that chokepoint, so
+macros fire uniformly across platforms — including Discord.
+
+The reload-text reported by `/reload-skills` includes a macros count
+line so operators can confirm a reload picked up their changes without
+checking file mtimes.
+
+---
+
 ## Toolsets
 
 All toolsets are defined in `toolsets.py` as a single `TOOLSETS` dict.

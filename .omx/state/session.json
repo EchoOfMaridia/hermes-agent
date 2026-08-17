@@ -1,0 +1,10 @@
+{
+  "session_id": "019fc7d7-bd40-77d0-b760-65f9a25ff9ba",
+  "native_session_id": "019fc7d7-bd40-77d0-b760-65f9a25ff9ba",
+  "started_at": "2026-08-03T13:38:47.923Z",
+  "cwd": "/home/cage/Desktop/Workspaces/HermesDesktop",
+  "pid": 2919694,
+  "platform": "linux",
+  "pid_start_ticks": 49053792,
+  "pid_cmdline": "/home/cage/Desktop/Workspaces/codex-minimax/codex-rs/target/release/codex -p minimax-m3"
+}

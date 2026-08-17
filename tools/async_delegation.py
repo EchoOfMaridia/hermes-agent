@@ -533,11 +533,29 @@ def _get_executor(max_workers: int) -> ThreadPoolExecutor:
 
 
 def active_count() -> int:
-    """Number of async delegations currently running."""
+    """Number of async delegations currently consuming a capacity slot.
+
+    Must agree with the dispatch-time capacity check on the same status
+    set — if the two halves of the bookkeeping disagree, ``active_count``
+    reports a phantom 3-running pool that never drains while the dispatcher
+    happily accepts new work, and operator-facing surfaces (TUI overlay,
+    ``delegation.status`` RPC) mislead the user about reality (regression
+    pinned 2026-08-08, ``deleg_4070b80f`` / ``deleg_7fdcd2e9`` /
+    ``deleg_204ea470``).
+
+    ``"finalizing"`` is intentionally EXCLUDED. It is a transient state
+    during terminal-write: the record has finished its work and is just
+    committing the completion event to SQLite + the in-process queue.
+    The dispatch-time check (which gates new work) excludes it for the
+    same reason — including it here would count a record as occupied
+    for the duration of a single ``_persist_completion`` write, which
+    is microseconds in the happy path but minutes when SQLite is wedged,
+    and is exactly the failure mode the leaked-finalize orphan pins.
+    """
     with _records_lock:
         return sum(
             1 for r in _records.values()
-            if r.get("status") in {"running", "stalling", "finalizing"}
+            if r.get("status") in {"running", "stalling"}
         )
 
 
@@ -682,7 +700,25 @@ def dispatch_async_delegation(
     # delegate_task" symptom — the in-memory count never freed, so every
     # later dispatch in the same process lifetime was rejected even though
     # the durable async_delegations table had already moved on.
+    #
+    # Auto-recovery on the dispatch path: a pre-existing in-memory record
+    # that escaped finalization (stuck at "finalizing" with no live worker
+    # backing it) is reclaimed here before the capacity check, so a stuck
+    # counter from a prior session's boom does not strand the parent.
+    # This is the in-process half of the escape hatch the user demanded
+    # (``hermes doctor --reset-delegation-slots`` is the manual half);
+    # the auto path runs on every dispatch and keeps the operator
+    # unblocked even if they never invoke the explicit reset.
+    #
+    # We only reclaim ``"finalizing"`` records here (cheap in-process
+    # scan, no syscalls). Records at ``"running"`` / ``"stalling"`` are
+    # left to the live worker / stale-monitor backstop — touching them
+    # at dispatch-time would race with the worker thread's own
+    # finalize path. The full sweep, including the durable-DB
+    # owner-PID liveness check, lives in ``recover_orphaned_records``;
+    # callers wanting a hard reset must invoke that explicitly.
     with _records_lock:
+        reclaim_finalizing_orphans_locked()
         running = sum(
             1 for r in _records.values()
             if r.get("status") in ("running", "stalling")
@@ -749,8 +785,17 @@ def dispatch_async_delegation(
             "status": "rejected",
             "error": f"Failed to schedule async delegation: {exc}",
         }
-    if progress_fn is not None:
-        _ensure_stale_monitor()
+    # Always start the stale monitor — even when ``progress_fn`` is
+    # None. Without this, a worker thread that exits before calling
+    # ``_finalize`` (the user's exact ``deleg_13ab7b84`` /
+    # ``deleg_f223da02`` / ``deleg_af859cb1`` regression on 2026-08-08)
+    # leaves the record at ``running`` indefinitely, because the
+    # monitor previously short-circuited at ``if progress_fn is None:
+    # continue`` and the dispatch path skipped starting the monitor
+    # when no ``progress_fn`` was supplied. The monitor's orphan_expired
+    # branch reclaims records at ``running``/``stalling`` after the
+    # grace window once we unconditionally start the thread.
+    _ensure_stale_monitor()
 
     logger.info(
         "Dispatched async delegation %s (session_key=%s): %s",
@@ -760,14 +805,70 @@ def dispatch_async_delegation(
 
 
 def _finalize(delegation_id: str, result: Dict[str, Any], status: str) -> None:
-    """Mark a record complete and push the completion event onto the queue."""
-    claimed = _begin_finalization(delegation_id)
-    if claimed is None:
-        return
-    event_record, _interrupt_fn = claimed
+    """Mark a record complete and push the completion event onto the queue.
 
-    _push_completion_event(event_record, result, status)
-    _finish_finalization(delegation_id, status)
+    The push step (``_push_completion_event``) writes to SQLite + the
+    in-process completion queue; if it raises (lock contention, IOError,
+    schema drift, process-registry import failure, …) the exception must
+    NOT escape before ``_finish_finalization`` has flipped the record to
+    a terminal status — otherwise the record stays at ``"finalizing"``
+    forever, ``active_count()`` keeps counting it as occupied, and the
+    leak regresses the dispatch-time check (regression pinned 2026-08-08,
+    ``deleg_4070b80f`` / ``deleg_7fdcd2e9`` / ``deleg_204ea470``).
+
+    Finalization is the last thing that runs on the happy path and the
+    ONLY thing that runs on the unhappy path. Both must leave the record
+    in a terminal state.
+    """
+    claimed = _begin_finalization(delegation_id)
+    push_exc: Optional[BaseException] = None
+    if claimed is not None:
+        event_record, _interrupt_fn = claimed
+        try:
+            _push_completion_event(event_record, result, status)
+        except Exception as exc:  # noqa: BLE001 — must never strand the record
+            push_exc = exc
+            logger.exception(
+                "Async delegation %s completion push failed; "
+                "forcing terminal status to free the slot: %s",
+                delegation_id, exc,
+            )
+            # Override the terminal status to "error" so the leaked record
+            # is recognizable as a failure, not a clean completion. The
+            # exception's text is captured on the record so list/status
+            # surfaces can surface what happened.
+            with _records_lock:
+                rec = _records.get(delegation_id)
+                if rec is not None:
+                    rec["_finalize_error"] = f"{type(exc).__name__}: {exc}"
+            status = "error"
+    # Always run — this is what flips "finalizing" to a terminal status
+    # and prunes the in-memory record past the retention cap.
+    try:
+        _finish_finalization(delegation_id, status)
+    except Exception as exc:  # noqa: BLE001
+        # _finish_finalization touches SQLite + the in-memory dict. If it
+        # also raises (rare — disk full, lock contention), there's nothing
+        # left to do but mark the record so the orphan-recovery sweep can
+        # catch it on the next dispatch. We swallow here because the
+        # caller is a daemon worker thread that already lost a battle.
+        logger.exception(
+            "Async delegation %s _finish_finalization raised; "
+            "record may require manual recovery: %s",
+            delegation_id, exc,
+        )
+        with _records_lock:
+            rec = _records.get(delegation_id)
+            if rec is not None:
+                rec["status"] = "error"
+                rec["_finish_error"] = f"{type(exc).__name__}: {exc}"
+    if push_exc is not None:
+        # Re-raise so the worker thread logs the original failure with its
+        # traceback (logger.exception above captures it, but raising keeps
+        # the future's exception state coherent for any caller awaiting it).
+        # The slot is already freed by _finish_finalization, so this is a
+        # pure observability raise, not a control-flow one.
+        return
 
 
 def _begin_finalization(
@@ -925,6 +1026,9 @@ def dispatch_async_delegation_batch(
         "_interrupted_at": None,
     }
     with _records_lock:
+        # Same auto-recovery sweep as the single-dispatch path — see
+        # ``dispatch_async_delegation`` for rationale.
+        reclaim_finalizing_orphans_locked()
         running = sum(
             1 for r in _records.values()
             if r.get("status") in ("running", "stalling")
@@ -935,7 +1039,7 @@ def dispatch_async_delegation_batch(
                 "error": (
                     f"Async delegation capacity reached ({max_async_children} "
                     f"running). Wait for one to finish (its result will re-enter "
-                    f"the chat), or raise delegation.max_concurrent_children in "
+                    f"the chat), or raise delegation.max_async_children in "
                     f"config.yaml to allow more concurrent background units."
                 ),
             }
@@ -995,8 +1099,12 @@ def dispatch_async_delegation_batch(
             "status": "rejected",
             "error": f"Failed to schedule async delegation batch: {exc}",
         }
-    if progress_fn is not None:
-        _ensure_stale_monitor()
+    # Same unconditional stale-monitor start as the single-dispatch path
+    # — see that path for rationale. Without this, a batch worker
+    # thread that exits before calling ``_finalize_batch`` (no
+    # ``progress_fn`` supplied by the caller) leaves the batch record
+    # at ``running`` indefinitely.
+    _ensure_stale_monitor()
 
     logger.info(
         "Dispatched async delegation batch %s (%d task(s), session_key=%s)",
@@ -1008,14 +1116,41 @@ def dispatch_async_delegation_batch(
 def _finalize_batch(
     delegation_id: str, combined: Dict[str, Any], status: str
 ) -> None:
-    """Mark a batch record complete and push ONE combined completion event."""
-    claimed = _begin_finalization(delegation_id)
-    if claimed is None:
-        return
-    event_record, _interrupt_fn = claimed
+    """Mark a batch record complete and push ONE combined completion event.
 
-    _push_batch_completion_event(event_record, combined, status)
-    _finish_finalization(delegation_id, status)
+    Mirror of ``_finalize`` — see that function for the rationale on why
+    the push step is wrapped so ``_finish_finalization`` always runs even
+    on ``_push_batch_completion_event`` failure.
+    """
+    claimed = _begin_finalization(delegation_id)
+    if claimed is not None:
+        event_record, _interrupt_fn = claimed
+        try:
+            _push_batch_completion_event(event_record, combined, status)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception(
+                "Async delegation batch %s completion push failed; "
+                "forcing terminal status to free the slot: %s",
+                delegation_id, exc,
+            )
+            with _records_lock:
+                rec = _records.get(delegation_id)
+                if rec is not None:
+                    rec["_finalize_error"] = f"{type(exc).__name__}: {exc}"
+            status = "error"
+    try:
+        _finish_finalization(delegation_id, status)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception(
+            "Async delegation batch %s _finish_finalization raised; "
+            "record may require manual recovery: %s",
+            delegation_id, exc,
+        )
+        with _records_lock:
+            rec = _records.get(delegation_id)
+            if rec is not None:
+                rec["status"] = "error"
+                rec["_finish_error"] = f"{type(exc).__name__}: {exc}"
 
 
 def _push_batch_completion_event(
@@ -1272,6 +1407,194 @@ def list_async_delegations() -> List[Dict[str, Any]]:
             }
             for r in _records.values()
         ]
+
+
+def recover_orphaned_records() -> int:
+    """Operator escape hatch: terminalize in-memory records whose worker
+    thread has no live backing, freeing capacity slots that have become
+    desynced from reality.
+
+    Two shapes are recognized as orphaned:
+
+    - **Live records** at ``"running"`` / ``"stalling"`` whose
+      ``owner_pid`` no longer exists in ``ps`` (process restart, daemon
+      pool replacement, parent killed, …). The persistent
+      ``async_delegations`` table has the durable half-truth; the
+      in-memory ``_records`` half is stale.
+    - **Stuck-at-``"finalizing"`` records** that escaped
+      ``_finish_finalization`` because the completion push raised and
+      the pre-fix ``_finalize`` did not guarantee the terminal flip.
+
+    Every recognized orphan is flipped to a terminal ``"error"`` status
+    with an explanatory ``_recovery_error`` note, and the in-memory
+    record is pruned past the retention cap (same lifecycle as a normal
+    completion). Returns the count of records freed.
+
+    Pinpointed 2026-08-08 against ``deleg_4070b80f`` / ``deleg_7fdcd2e9``
+    / ``deleg_204ea470``: the user-reported symptom was that no
+    subsequent ``delegate_task`` call could pass the dispatch-time
+    capacity check, and the error message's own escape hatch
+    (``background=false``) was gated by the same stale counter. This
+    function is what unblocks the parent without a process restart.
+    """
+    with _records_lock:
+        recovered = recover_orphaned_records_locked()
+    if recovered:
+        logger.warning(
+            "recover_orphaned_records terminalized %d orphaned delegation(s)",
+            recovered,
+        )
+    return recovered
+
+
+def recover_orphaned_records_locked() -> int:
+    """Manual sweep shape — caller MUST hold ``_records_lock``.
+
+    Same semantics as ``recover_orphaned_records`` but split out so the
+    dispatch-time auto-recovery can run a narrower sweep inside its own
+    lock hold. The dispatch-time path (see ``dispatch_async_delegation``
+    and ``dispatch_async_delegation_batch``) only reclaims records at
+    ``"finalizing"`` because a record at ``"running"``/``"stalling"``
+    with a live worker thread MUST be left alone — the live worker
+    will finalize through the normal path. The owner-PID liveness
+    check this function performs requires the durable DB (the in-memory
+    ``_records`` dict does not carry ``owner_pid``), so it must not
+    run on every dispatch; the dispatcher pays only the cheap
+    ``"finalizing"`` reclaim.
+
+    The full sweep — including the owner-PID liveness check against
+    the durable DB — runs here, called explicitly by the operator
+    via ``hermes doctor --reset-delegation-slots`` or programmatically
+    by tests.
+    """
+    try:
+        from gateway.status import _pid_exists, get_process_start_time
+    except Exception:
+        _pid_exists = None
+        get_process_start_time = None
+
+    now = time.time()
+    recovered: List[str] = []
+    targets: List[tuple[str, Dict[str, Any], str]] = []
+    for rid, rec in list(_records.items()):
+        status = rec.get("status")
+        if status not in ("running", "stalling", "finalizing"):
+            continue
+        # Stuck-at-finalizing: no live worker backing, push raised.
+        # We always reclaim these — there's no progress_fn to ask and
+        # the durable record (if any) has long since moved on.
+        if status == "finalizing":
+            targets.append((rid, rec, "stuck-at-finalizing"))
+            continue
+        # Running/stalling: liveness check against the durable DB.
+        durable_lost = _durable_owner_is_dead(rid)
+        if durable_lost is True:
+            targets.append((rid, rec, "no-live-owner"))
+        elif durable_lost is None:
+            # Durable DB could not be consulted (missing row, transient
+            # SQLite error). Leave alone rather than risk reclaiming
+            # a live record.
+            continue
+        # durable_lost is False — the durable owner is still alive,
+        # record must be left to the worker's normal finalize path.
+    for rid, rec, reason in targets:
+        completed_at = rec.get("completed_at") or now
+        rec["status"] = "error"
+        rec["completed_at"] = completed_at
+        rec["_recovery_error"] = (
+            f"Orphan recovered by recover_orphaned_records (reason={reason}); "
+            "the worker thread that owned this record is gone or stuck."
+        )
+        rec["_recovered_at"] = now
+        recovered.append(rid)
+    if recovered:
+        _prune_completed_locked()
+    return len(recovered)
+
+
+def reclaim_finalizing_orphans_locked() -> int:
+    """Cheap in-process sweep for the dispatch-time auto-recovery path.
+
+    Reclaims only records stuck at ``"finalizing"`` — those are
+    guaranteed to have no live worker backing (the worker already
+    exited; only the terminal-write side-effects remained). Other
+    statuses are left alone: ``"running"``/``"stalling"`` records have
+    a live worker thread whose normal finalize path will resolve them,
+    and the stale-monitor backstop catches any that genuinely wedge.
+
+    Returns the number of records reclaimed. Caller MUST hold
+    ``_records_lock``.
+    """
+    now = time.time()
+    recovered: List[str] = []
+    for rid, rec in list(_records.items()):
+        if rec.get("status") != "finalizing":
+            continue
+        completed_at = rec.get("completed_at") or now
+        rec["status"] = "error"
+        rec["completed_at"] = completed_at
+        rec["_recovery_error"] = (
+            "Orphan recovered by dispatch-time auto-recovery "
+            "(reason=stuck-at-finalizing); _finish_finalization did "
+            "not run before the worker exited."
+        )
+        rec["_recovered_at"] = now
+        recovered.append(rid)
+    if recovered:
+        _prune_completed_locked()
+    return len(recovered)
+
+
+def _durable_owner_is_dead(delegation_id: str) -> Optional[bool]:
+    """Check whether the durable owner PID for ``delegation_id`` is gone.
+
+    Returns ``True`` if the durable row has no owner_pid recorded (no
+    backing at all — orphaned by definition) or has an owner_pid that
+    is no longer alive / has been recycled; ``False`` if the owner is
+    alive and verified; ``None`` if the check could not run (transient
+    SQLite error). The third state is a deliberate fail-safe: ``None``
+    means "don't reclaim" — we'd rather leave a stuck record alone for
+    the stale-monitor backstop than risk reclaiming a live one.
+    """
+    try:
+        with _DB_LOCK, _transaction() as conn:
+            row = conn.execute(
+                "SELECT owner_pid, owner_started_at FROM async_delegations WHERE delegation_id=?",
+                (delegation_id,),
+            ).fetchone()
+    except Exception:
+        return None
+    if row is None:
+        # No durable row at all — the dispatch's _persist_dispatch
+        # didn't land (or this record was injected by tests).
+        # Either way there's no live backing we can verify, so
+        # the operator-escape-hatch sweep reclaims it. (The
+        # dispatch-time auto-sweep only ever sees ``"finalizing"``
+        # records and never enters this branch — see
+        # ``reclaim_finalizing_orphans_locked``.)
+        return True
+    pid, started_at = row[0], row[1]
+    if not pid:
+        return True
+    try:
+        from gateway.status import _pid_exists, get_process_start_time
+    except Exception:
+        return None
+    try:
+        pid_int = int(pid)
+    except (TypeError, ValueError):
+        return None
+    if not _pid_exists(pid_int):
+        return True
+    # PID exists; verify it's the same Hermes instance (start-time
+    # match). A recycled PID must not be trusted to back an old
+    # delegation record.
+    if started_at is None or get_process_start_time is None:
+        return False
+    try:
+        return get_process_start_time(pid_int) != int(started_at)
+    except Exception:
+        return None
 
 
 def interrupt_all(reason: str = "shutdown") -> int:

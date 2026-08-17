@@ -630,6 +630,27 @@ def run_conversation(
         except Exception:
             pass
 
+    # ── Macro expansion ─────────────────────────────────────────────────
+    # Inline ``[key]`` tokens in the user prompt with values from
+    # ``~/.hermes/macros.yaml`` BEFORE the rest of the agent loop sees the
+    # message, so the expanded text is what gets sanitized, persisted, and
+    # forwarded to the LLM. Undefined keys render unchanged (single-pass;
+    # values containing other ``[key]`` tokens are NOT themselves expanded).
+    # The unexpanded form is preserved on ``user_message`` for log surfaces.
+    try:
+        from agent.macros import expand_macros, get_macros
+
+        _expanded_user_message, _used_macro_keys = expand_macros(
+            user_message, get_macros()
+        )
+        if _used_macro_keys:
+            logger.debug("used_macros=%s", _used_macro_keys)
+        user_message = _expanded_user_message
+    except Exception:
+        # Macros expansion is best-effort; a malformed macros file or an
+        # unexpected loader failure must not block the user's prompt.
+        logger.debug("macro expansion skipped", exc_info=True)
+
     # ── Per-turn setup (the prologue) ──
     # All once-per-turn setup — stdio guarding, retry-counter resets, user
     # message sanitization, todo/nudge hydration, system-prompt restore-or-

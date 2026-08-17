@@ -4540,6 +4540,38 @@ def cmd_hooks(args):
 
 def cmd_doctor(args):
     """Check configuration and dependencies."""
+    # Operator escape hatch: force-reclaim orphaned async-delegation slots.
+    # When the running process's dispatcher counter has drifted from
+    # reality (e.g. a subagent's worker thread died before finalizing, or
+    # ``_push_completion_event`` raised and stranded a record at
+    # ``"finalizing"``) ``delegate_task`` keeps rejecting new dispatches
+    # even though no live subagent work is in flight. The CLI auto-recovery
+    # sweep runs on every dispatch too, but a manual reset here gives the
+    # operator a single, named knob to unblock the parent without a
+    # process restart.
+    if getattr(args, "reset_delegation_slots", False):
+        from tools import async_delegation as _ad
+        from tools.async_delegation import recover_orphaned_records
+
+        # Snapshot the active count BEFORE so the operator sees the delta.
+        active_before = _ad.active_count()
+        running_before = sum(
+            1 for r in _ad._records.values()
+            if r.get("status") in ("running", "stalling")
+        )
+        freed = recover_orphaned_records()
+        running_after = sum(
+            1 for r in _ad._records.values()
+            if r.get("status") in ("running", "stalling")
+        )
+        print(
+            f"recover_orphaned_records: freed {freed} orphaned delegation(s); "
+            f"active_count {active_before} -> {_ad.active_count()}; "
+            f"capacity-slot holders (running+stalling) {running_before} "
+            f"-> {running_after}"
+        )
+        return
+
     from hermes_cli.doctor import run_doctor
 
     run_doctor(args)

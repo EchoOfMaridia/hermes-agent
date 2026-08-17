@@ -32,4 +32,16 @@ def build_doctor_parser(subparsers, *, cmd_doctor: Callable) -> None:
             "doctor` first to see active advisories and their IDs."
         ),
     )
+    doctor_parser.add_argument(
+        "--reset-delegation-slots",
+        action="store_true",
+        help=(
+            "Force-reclaim orphaned async-delegation slots in the running "
+            "process. Use when ``delegate_task(background=true)`` returns "
+            "``Async delegation capacity reached (N running)`` even though "
+            "no live subagent work is in flight — the dispatcher counter has "
+            "drifted from reality and needs an in-process reset to unblock "
+            "the parent. Records with a live worker backing are left alone."
+        ),
+    )
     doctor_parser.set_defaults(func=cmd_doctor)

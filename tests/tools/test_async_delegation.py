@@ -471,7 +471,10 @@ def test_stall_stays_finalizing_until_durable_persistence(tmp_path, monkeypatch)
 
     try:
         assert persist_entered.wait(timeout=5)
-        assert ad.active_count() == 1
+        # The dispatch-time counter no longer charges for the transient
+        # ``"finalizing"`` state (see ``active_count`` docstring), but
+        # the record itself is observably mid-finalize. Assert on the
+        # observable in-memory state, not on the operator-facing counter.
         record = next(
             item for item in ad.list_async_delegations()
             if item["delegation_id"] == dispatched["delegation_id"]
@@ -483,6 +486,8 @@ def test_stall_stays_finalizing_until_durable_persistence(tmp_path, monkeypatch)
         evt = _drain_for(dispatched["delegation_id"])
         assert evt is not None
         assert evt["status"] == "stalled"
+        # ``active_count`` must now reflect reality: no capacity-slot
+        # holders (the record is terminal, not transient).
         assert ad.active_count() == 0
         durable = ad.get_durable_delegation(dispatched["delegation_id"])
         assert durable["state"] == "stalled"
@@ -510,10 +515,17 @@ r = ad.dispatch_async_delegation(
     runner=lambda: gate.wait(timeout=60),
     progress_fn=lambda: ((0, None), False),
 )
+# Wait for the durable row to settle on ``stalled``. Polling
+# ``active_count`` is racy now that ``"finalizing"`` is transient
+# (the dispatcher doesn't charge for the in-progress finalization
+# step); polling the durable row's state is the stable signal.
 deadline = time.time() + 10
-while ad.active_count() and time.time() < deadline:
+row = None
+while time.time() < deadline:
+    row = ad.get_durable_delegation(r["delegation_id"])
+    if row and row.get("state") == "stalled":
+        break
     time.sleep(.01)
-row = ad.get_durable_delegation(r["delegation_id"])
 print(json.dumps({"delegation_id": r["delegation_id"], "row": row}, sort_keys=True))
 '''
     first = subprocess.run(
@@ -608,8 +620,15 @@ r = ad.dispatch_async_delegation(
     session_key="owner-session", parent_session_id="durable-parent",
     runner=lambda: {"status": "completed", "summary": "after restart"},
 )
+# Wait for the durable row to settle on a terminal state. Polling
+# ``active_count`` is racy now that ``"finalizing"`` is transient
+# (the dispatcher doesn't charge for the in-progress finalization
+# step); polling the durable row's state is the stable signal.
 deadline = time.time() + 5
-while ad.active_count() and time.time() < deadline:
+while time.time() < deadline:
+    row = ad.get_durable_delegation(r["delegation_id"])
+    if row and row.get("state") not in ("running", "finalizing"):
+        break
     time.sleep(.01)
 print(r["delegation_id"])
 '''

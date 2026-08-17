@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "active": true,
+  "skill": "analyze",
+  "keyword": "investigate",
+  "phase": "planning",
+  "activated_at": "2026-08-03T13:38:48.313Z",
+  "updated_at": "2026-08-03T14:32:39.761Z",
+  "source": "keyword-detector",
+  "session_id": "019fc7d7-bd40-77d0-b760-65f9a25ff9ba",
+  "thread_id": "",
+  "turn_id": "019fc80a-80d4-7802-b417-847b1862d95c",
+  "active_skills": [
+    {
+      "skill": "analyze",
+      "phase": "planning",
+      "active": true,
+      "activated_at": "2026-08-03T13:38:48.313Z",
+      "updated_at": "2026-08-03T14:32:39.761Z",
+      "session_id": "019fc7d7-bd40-77d0-b760-65f9a25ff9ba",
+      "thread_id": "",
+      "turn_id": "019fc80a-80d4-7802-b417-847b1862d95c"
+    }
+  ]
+}

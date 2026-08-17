@@ -3500,6 +3500,30 @@ class APIServerAdapter(BasePlatformAdapter):
             elif event_type in {"tool.started", "tool.completed", "tool.failed"}:
                 event_name = event_type.replace("tool.", "tool.")
                 _enqueue(event_name, {"message_id": message_id, "tool_name": tool_name, "preview": preview, "args": args})
+            elif event_type.startswith("subagent."):
+                # Background subagents emit subagent.* events after the
+                # parent's turn has already finished. The desktop
+                # renderer's use-message-stream listens for these on
+                # the SUBAGENT_EVENT_TYPES set (subagent.start /
+                # .progress / .complete / .spawn_requested / .thinking /
+                # .text / .tool) and updates the Subagents panel via
+                # upsertSubagent(). Without this branch, the dispatcher
+                # in tools/delegate_tool._build_child_progress_callback
+                # fires the events but they're dropped at the SSE
+                # boundary — the parent turn is gone, so the events
+                # never surface anywhere else, and the desktop silently
+                # "drops" async subagents that are actually running fine
+                # (regression pinned 2026-08-08: deleg_3e3dc250 /
+                # deleg_a42b2ffd in session 20260808_165817_7fbed1).
+                payload = {"message_id": message_id}
+                if tool_name:
+                    payload["tool_name"] = tool_name
+                if preview is not None:
+                    payload["preview"] = preview
+                if args is not None:
+                    payload["args"] = args
+                payload.update(kwargs)
+                _enqueue(event_type, payload)
 
         async def _run_and_signal() -> None:
             try:
