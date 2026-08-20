@@ -94,6 +94,7 @@ from agent.trajectory import has_incomplete_scratchpad
 from agent.turn_finalizer import finalize_turn
 from agent.usage_pricing import estimate_usage_cost, normalize_usage
 from agent import empty_response_guard as _empty_guard
+from agent.prompt_builder import _OPERATOR_DIRECTIVE_REMINDER
 from hermes_constants import PARTIAL_STREAM_STUB_ID
 from hermes_logging import set_session_context
 from tools.skill_provenance import set_current_write_origin
@@ -1239,6 +1240,50 @@ def _clone_message_for_send(msg):
     return msg
 
 
+def _maybe_inject_operator_reminder(
+    messages: List[Dict[str, Any]],
+    *,
+    turn_count: int,
+    every_n_turns: int,
+    reminder_text: Optional[str] = None,
+    synthetic_marker: bool = True,
+) -> List[Dict[str, Any]]:
+    """X2 mid-session operator-directive reminder — TPipe parity.
+
+    Returns ``messages`` unchanged when ``every_n_turns <= 0`` (operator
+    opt-out). When ``turn_count > 0`` and is a positive multiple of
+    ``every_n_turns``, appends a single user-role message containing
+    ``reminder_text`` to the end of the list. The system message is
+    preserved at index 0; the reminder is added at the tail.
+
+    Caching contract: this does NOT mutate the agent's cached system
+    prompt. It is a per-call user-role injection. The next provider call
+    sees the reminder as the most recent user-role content, so it is the
+    last thing the model reads before deciding its assistant turn.
+
+    TPipe parity: see ``TPipe Pipe.kt:3379`` which does
+    ``systemPrompt += injectionMessage reasoningOutput`` mid-session
+    (TPipe mutates the system prompt; Hermes chose user-role because the
+    cached system prompt is treated as read-only after first turn).
+    """
+    if not isinstance(messages, list):
+        return list(messages) if messages is not None else []
+    if not isinstance(every_n_turns, int) or every_n_turns <= 0:
+        return list(messages)
+    if not isinstance(turn_count, int) or turn_count <= 0:
+        return list(messages)
+    if turn_count % every_n_turns != 0:
+        return list(messages)
+    if not reminder_text or not isinstance(reminder_text, str):
+        return list(messages)
+    out = list(messages)
+    reminder_msg: Dict[str, Any] = {"role": "user", "content": reminder_text}
+    if synthetic_marker:
+        reminder_msg["_operator_directive_reminder_synthetic"] = True
+    out.append(reminder_msg)
+    return out
+
+
 def _canonicalize_api_tool_calls(api_messages) -> None:
     """Canonicalize tool-call argument JSON on the send-path message copy.
 
@@ -2372,6 +2417,40 @@ def run_conversation(
             api_messages,
             drop_codex_reasoning_items=agent.api_mode != "codex_responses",
         )
+
+        # X2 — Operator-directive reminder every N API calls. Per-call, not
+        # per-turn: this fires at api_messages build time so the reminder is
+        # the most recent user-role content the model reads before deciding.
+        # Gated on cfg["agent"]["operator_directive_reminder_every_n_calls"]
+        # (default 30). Set to 0 to opt out.
+        try:
+            _rem_every_n = 30
+            try:
+                _cfg = getattr(agent, "_config", None)
+                if isinstance(_cfg, dict):
+                    _agent_cfg = _cfg.get("agent") or {}
+                    _rem_v = _agent_cfg.get("operator_directive_reminder_every_n_calls", 30)
+                    if isinstance(_rem_v, int):
+                        _rem_every_n = _rem_v
+            except Exception:
+                pass
+            # Per-call counter lives on the agent instance; survives retries
+            # within run_conversation but resets across sessions naturally.
+            # Initialized to 1 so first call (after increment) fires at turn 1,
+            # then every _rem_every_n calls (turns 1, N+1, 2N+1, ...).
+            _rem_counter = getattr(agent, "_operator_directive_reminder_counter", None)
+            if not isinstance(_rem_counter, int):
+                _rem_counter = 1
+            _rem_counter += 1
+            setattr(agent, "_operator_directive_reminder_counter", _rem_counter)
+            api_messages = _maybe_inject_operator_reminder(
+                api_messages,
+                turn_count=_rem_counter,
+                every_n_turns=_rem_every_n,
+                reminder_text=_OPERATOR_DIRECTIVE_REMINDER,
+            )
+        except Exception as _rem_err:
+            logger.debug("X2 reminder inject failed (non-fatal): %s", _rem_err)
 
         # Normalize message whitespace and tool-call JSON for consistent
         # prefix matching.  Ensures bit-perfect prefixes across turns,

@@ -3916,6 +3916,55 @@ def compress_context(
                 else None
             ),
         )
+
+        # ── post_context_compact plugin hook ──────────────────────────────────
+        # Fire once per compaction event. Plugins return context to re-anchor
+        # the LLM after compression loss (todo list, loaded skill rules, plan
+        # file progress, system prompt reminders). Context is consumed by the
+        # caller (run_conversation) as an ephemeral re-anchoring message in the
+        # next user turn — NOT persisted to the session DB.
+        # Fail-open: plugin errors are caught so compression itself cannot break.
+        # Stashed on agent (not returned in the tuple) so the existing 2-tuple
+        # ``(compressed, new_system_prompt)`` contract is preserved for the
+        # many callers across cli.py, gateway/, tui_gateway/, acp_adapter/.
+        try:
+            from hermes_cli.plugins import has_hook, invoke_hook as _invoke_hook
+
+            if has_hook("post_context_compact"):
+                _results = _invoke_hook(
+                    "post_context_compact",
+                    session_id=agent.session_id or "",
+                    boundary_parent=_boundary_parent or "",
+                    compressed_messages=compressed,
+                    system_prompt=new_system_prompt or "",
+                    compression_count=agent.context_compressor.compression_count,
+                    in_place=in_place,
+                    platform=getattr(agent, "platform", None) or "cli",
+                    model=getattr(agent, "model", None) or "",
+                )
+                if _results:
+                    for _r in _results:
+                        _raw = None
+                        if isinstance(_r, str) and _r.strip():
+                            _raw = _r.strip()
+                        elif isinstance(_r, dict):
+                            _raw = _r.get("context", "") or ""
+                            if not isinstance(_raw, str):
+                                _raw = None
+                        if _raw:
+                            # Per-plugin bound: truncate at 2000 chars to prevent
+                            # a misbehaving plugin from bloating the context.
+                            _max_chars = getattr(agent, "_post_compact_max_chars", 2000)
+                            if len(_raw) > _max_chars:
+                                _raw = (
+                                    _raw[:_max_chars]
+                                    + f"\n\n[post_context_compact hook: truncated {len(_raw) - _max_chars} chars]"
+                                )
+                            agent._post_compact_context = _raw
+                            break  # first plugin wins
+        except Exception:
+            pass  # fail-open
+
         return compressed, new_system_prompt
     finally:
         # Release the lock on the OLD session_id only AFTER rotation completed

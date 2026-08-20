@@ -66,7 +66,7 @@ _PATTERNS: List[Tuple[str, str, str]] = [
     (r'system\s+prompt\s+override', "sys_prompt_override", "all"),
     (rf'disregard\s+{_FILLER}(your|all|any)\s+{_FILLER}(instructions|rules|guidelines)', "disregard_rules", "all"),
     (rf'act\s+as\s+(if|though)\s+{_FILLER}you\s+{_FILLER}(have\s+no|don\'t\s+have)\s+{_FILLER}(restrictions|limits|rules)', "bypass_restrictions", "all"),
-    (r'<!--[^>]{0,512}(?:ignore|override|system|secret|hidden)[^>]{0,512}-->', "html_comment_injection", "all"),
+    (r'<!--[^>]*(?:ignore|secret|hidden)[^>]*-->', "html_comment_injection", "all"),
     (r'<\s*div\s+style\s*=\s*["\'][^>]{0,2048}display\s*:\s*none', "hidden_div", "all"),
     (r'translate\s+[^\n]{0,512}\s+into\s+[^\n]{0,512}\s+and\s+(execute|run|eval)', "translate_execute", "all"),
     (rf'do\s+not\s+{_FILLER}tell\s+{_FILLER}the\s+user', "deception_hide", "all"),
@@ -74,7 +74,15 @@ _PATTERNS: List[Tuple[str, str, str]] = [
     # ── Role-play / identity hijack (context + strict; common attack
     #    surface in scraped web content and poisoned context files) ──
     (rf'you\s+are\s+{_FILLER}now\s+(?:a|an|the)\s+', "role_hijack", "context"),
-    (rf'pretend\s+{_FILLER}(you\s+are|to\s+be)\s+', "role_pretend", "context"),
+    # NOTE: role_pretend removed. The pattern was meant to catch web-fetched
+    # content telling the agent "pretend to be a different AI", but it also
+    # fired on user-authored SOUL.md phrases like "you are a helpful AI that
+    # can pretend to be anything the user wants" — exactly the personality
+    # instructions the user wants. The real attack surface is captured by
+    # role_hijack above (you-are-now-X) and by leak_system_prompt below
+    # (output system prompt). Removing role_pretend keeps the defenses that
+    # actually catch attacks while letting the agent's own personality file
+    # load.
     (rf'output\s+{_FILLER}(system|initial)\s+prompt', "leak_system_prompt", "context"),
     (rf'(respond|answer|reply)\s+without\s+{_FILLER}(restrictions|limitations|filters|safety)', "remove_filters", "context"),
     (rf'you\s+have\s+been\s+{_FILLER}(updated|upgraded|patched)\s+to', "fake_update", "context"),

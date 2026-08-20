@@ -213,6 +213,20 @@ VALID_HOOKS: Set[str] = {
     "on_session_end",
     "on_session_finalize",
     "on_session_reset",
+    # post_context_compact: fired once by ``agent._compress_context`` after
+    # the compressed message list is built, BEFORE the (compressed,
+    # new_system_prompt) tuple is returned. Plugins return re-anchoring
+    # context (todo list, loaded skill rules, plan file progress, system
+    # prompt reminders) that the caller surfaces onto the next user message
+    # as an ephemeral pre-LLM nudge. The context is NOT persisted to the
+    # session DB. Return shapes: str (used verbatim), or a dict
+    # ``{"context": "<text>"}``. First non-empty result wins; the agent
+    # stashes the payload on ``agent._post_compact_context`` and consumes it
+    # at the post-compaction re-anchor site (turn_context.py), so the
+    # existing 2-tuple ``(compressed, new_system_prompt)`` return contract
+    # is preserved for all callers. Fail-open: any plugin exception is
+    # caught so a broken hook cannot break compression itself.
+    "post_context_compact",
     # Successful skill lifecycle facts. The local skill name is available to
     # plugins, while built-in shared metrics emit only bounded classifications.
     "on_skill_lifecycle",

@@ -849,6 +849,19 @@ def build_turn_context(
                     )
                     agent._persist_user_message_idx = current_turn_user_idx
 
+                    # post_context_compact hook payload (catchup contract):
+                    # if a plugin returned re-anchoring context, surface it on
+                    # the user message so the next LLM turn sees it. Consumed
+                    # and nulled after one use so it doesn't bleed across turns.
+                    _post_compact = getattr(agent, "_post_compact_context", None)
+                    if _post_compact:
+                        user_message = (
+                            f"{user_message}\n\n{_post_compact}"
+                            if isinstance(user_message, str) and user_message
+                            else (_post_compact or user_message)
+                        )
+                        agent._post_compact_context = None
+
     # ── Preflight context compression ──
     # Gate the (expensive) full token estimate behind a cheap pre-check.
     # See ``_should_run_preflight_estimate`` for the OR semantics that fix
@@ -1167,6 +1180,19 @@ def build_turn_context(
             messages, user_message
         )
         agent._persist_user_message_idx = current_turn_user_idx
+
+        # post_context_compact hook payload (catchup contract): surface any
+        # re-anchoring context a plugin returned on agent._post_compact_context
+        # onto the user message so the next LLM turn sees it. Consumed and
+        # nulled after one use so it doesn't bleed across turns.
+        _post_compact = getattr(agent, "_post_compact_context", None)
+        if _post_compact:
+            user_message = (
+                f"{user_message}\n\n{_post_compact}"
+                if isinstance(user_message, str) and user_message
+                else (_post_compact or user_message)
+            )
+            agent._post_compact_context = None
 
     # Plugin hook: pre_llm_call (context injected into user message, not system prompt).
     plugin_user_context = ""
