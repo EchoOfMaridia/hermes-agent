@@ -1439,11 +1439,25 @@ def interruptible_api_call(agent, api_kwargs: dict):
             # builds it via this callback (openai- or anthropic-kind) so the
             # interrupt / stale-call detectors can force-close the worker's
             # connection without touching the shared client (#67142).
+            # Defensive fallback: same as the streaming path — if the
+            # per-request Anthropic client helper is missing on this agent
+            # (cached subclass drift between helper module and gateway-cached
+            # agent class), fall back to the shared _anthropic_client so the
+            # non-streaming path degrades to the long-lived client instead of
+            # raising AttributeError on every retry.
+            def _anthropic_make_client(reason):
+                _create_request = getattr(
+                    agent, "_create_request_anthropic_client", None
+                )
+                if callable(_create_request):
+                    return _create_request(reason=reason)
+                return agent._anthropic_client
+
             result["response"] = _dispatch_nonstreaming_api_request(
                 agent,
                 api_kwargs,
                 make_client=lambda reason, kind="openai": _set_request_client(
-                    agent._create_request_anthropic_client(reason=reason)
+                    _anthropic_make_client(reason)
                     if kind == "anthropic_messages"
                     else agent._create_request_openai_client(
                         reason=reason, api_kwargs=api_kwargs
@@ -4710,12 +4724,29 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
                         # #67142: per-request client (credential refresh happens
                         # inside _create_request_anthropic_client) registered so
                         # the watchdog aborts its socket, not the shared client.
-                        request_client = _set_request_client(
-                            agent._create_request_anthropic_client(
-                                reason="anthropic_stream_request"
-                            ),
-                            kind="anthropic_messages",
+                        # Defensive fallback: the helper is on the AIAgent
+                        # upstream class, but live gateway processes running
+                        # against a hand-port branch can cache an AIAgent
+                        # subclass that lacks it (operator observable as the
+                        # canned "model provider failed after retries"
+                        # fallback after every Discord / Telegram message).
+                        # Mirror the _emit_stream_* getattr(..., None) pattern
+                        # below: fall back to the shared _anthropic_client so
+                        # the user-facing path degrades to the long-lived
+                        # client instead of dying on AttributeError.
+                        _create_request = getattr(
+                            agent, "_create_request_anthropic_client", None
                         )
+                        if callable(_create_request):
+                            request_client = _set_request_client(
+                                _create_request(reason="anthropic_stream_request"),
+                                kind="anthropic_messages",
+                            )
+                        else:
+                            request_client = _set_request_client(
+                                agent._anthropic_client,
+                                kind="anthropic_messages",
+                            )
                         result["response"] = _call_anthropic(request_client)
                     else:
                         result["response"] = _call_chat_completions(stream_attempt_id)
